@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>我的第一个网页</title>
+    <style>
+        body {
+            font-family: "Microsoft YaHei", sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f7fa;
+        }
+        h1 {
+            color: #667eea;
+            text-align: center;
+        }
+        .card {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: center;
+        }
+        th {
+            background-color: #667eea;
+            color: white;
+        }
+        .highlight {
+            color: #e74c3c;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>欢迎来到我的第一个网页</h1>
+
+    <div class="card">
+        <h2>个人介绍</h2>
+        <p>大家好，我叫 <span class="highlight">杨增浩</span>，正在学习 Python 和数据分析。</p>
+        <p>这个网页是我用 HTML 和 CSS 写的第一个网页。</p>
+    </div>
+
+    <div class="card">
+        <h2>我的学习进度</h2>
+        <table>
+            <tr>
+                <th>科目</th>
+                <th>学习状态</th>
+                <th>掌握程度</th>
+            </tr>
+            <tr>
+                <td>Python 基础</td>
+                <td>已完成</td>
+                <td>80%</td>
+            </tr>
+            <tr>
+                <td>Pandas</td>
+                <td>学习中</td>
+                <td>60%</td>
+            </tr>
+            <tr>
+                <td>SQL</td>
+                <td>学习中</td>
+                <td>50%</td>
+            </tr>
+            <tr>
+                <td>机器学习</td>
+                <td>已完成</td>
+                <td>70%</td>
+            </tr>
+        </table>
+    </div>
+
+    <div class="card">
+        <h2>我的目标</h2>
+        <ul>
+            <li>掌握 Python 数据分析</li>
+            <li>学会大数据开发（Spark、Airflow）</li>
+            <li>学会大模型应用开发（RAG、Agent）</li>
+            <li>明年9月去香港读数据科学硕士</li>
+        </ul>
+    </div>
+
+</body>
+</html>
