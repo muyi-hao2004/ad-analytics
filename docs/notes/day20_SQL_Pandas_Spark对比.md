@@ -76,6 +76,29 @@ spark = SparkSession.builder.appName("Test").getOrCreate()
 
 ---
 
+### 6.1.1 按两列分组
+
+**语法：** 把两个列名都放到列表里
+
+**SQL：**
+```sql
+SELECT channel, date, SUM(cost) as total_cost
+FROM ad_data
+GROUP BY channel, date
+```
+
+**Pandas：**
+```python
+df.groupby(["channel", "date"])["cost"].sum().reset_index()
+```
+
+**Spark：**
+```python
+df.groupBy("channel", "date").sum("cost")
+```
+
+---
+
 ### 6.2 多个聚合 + 重命名列
 
 **SQL：**
@@ -226,6 +249,72 @@ FROM ad_data
 **Pandas：**
 ```python
 df["cum_cost"] = df.groupby("channel")["cost"].cumsum()
+```
+
+**Spark：**
+```python
+window = Window.partitionBy("channel").orderBy("date")
+df.withColumn("cum_cost", F.sum("cost").over(window))
+```
+
+---
+
+### 11.4 滑动窗口（最近N天平均）
+
+**SQL：**
+```sql
+SELECT date, channel, cpa,
+       AVG(cpa) OVER (
+           PARTITION BY channel
+           ORDER BY date
+           ROWS BETWEEN 1 PRECEDING AND CURRENT ROW
+       ) as avg_2d_cpa
+FROM ad_data
+```
+
+**Pandas：**
+```python
+df["avg_2d_cpa"] = df.groupby("channel")["cpa"].rolling(2).mean().reset_index(level=0, drop=True)
+```
+
+**Spark：**
+```python
+window = Window.partitionBy("channel").orderBy("date").rowsBetween(-1, 0)
+df.withColumn("avg_2d_cpa", F.avg("cpa").over(window))
+```
+
+---
+
+### 11.5 每日Top N（分组后取前N名）
+
+**思路：** 先排名，再筛选排名 <= N
+
+**SQL：**
+```sql
+WITH ranked AS (
+    SELECT date, channel, cpa,
+           RANK() OVER (PARTITION BY date ORDER BY cpa ASC) as rk
+    FROM ad_data
+)
+SELECT date, channel, cpa, rk
+FROM ranked
+WHERE rk <= 2
+```
+
+**Pandas：**
+```python
+# 第一步：排名
+df["rk"] = df.groupby("date")["cpa"].rank(ascending=True)
+# 第二步：选前2名
+result = df[df["rk"] <= 2][["date", "channel", "cpa", "rk"]]
+```
+
+**Spark：**
+```python
+window = Window.partitionBy("date").orderBy(F.col("cpa").asc())
+df.withColumn("rk", F.rank().over(window)) \
+  .filter(F.col("rk") <= 2) \
+  .select("date", "channel", "cpa", "rk")
 ```
 
 ---
