@@ -42,7 +42,58 @@ d.items()   # 所有key-value对
 
 ---
 
-## 二、字符串常用方法
+## 二、列表推导式
+
+### 基本格式
+```python
+[要放进去的东西 for x in 原列表]
+```
+
+### 1. 基本用法
+```python
+[x * 2 for x in range(5)]
+# [0, 2, 4, 6, 8]
+```
+
+### 2. 加过滤条件（if在后面）
+```python
+# 只保留偶数
+[x for x in range(10) if x % 2 == 0]
+# [0, 2, 4, 6, 8]
+```
+
+### 3. if-else分支（if在前面）
+```python
+# 偶数乘2，奇数不变
+[x * 2 if x % 2 == 0 else x for x in range(10)]
+```
+
+### 4. 嵌套循环（二维列表拍平）
+```python
+matrix = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+[num for row in matrix for num in row]
+# [1, 2, 3, 4, 5, 6, 7, 8, 9]
+```
+
+### 5. 字典推导式
+```python
+# 键值互换
+d = {"a": 1, "b": 2, "c": 3}
+{value: key for key, value in d.items()}
+# {1: 'a', 2: 'b', 3: 'c'}
+```
+
+### 对比总结
+| 类型 | 格式 |
+|------|------|
+| 基本 | `[x for x in list]` |
+| 过滤 | `[x for x in list if 条件]` |
+| 分支 | `[A if 条件 else B for x in list]` |
+| 嵌套循环 | `[x for row in matrix for x in row]` |
+
+---
+
+## 三、字符串常用方法
 
 ```python
 s = "  Hello World  "
@@ -62,7 +113,7 @@ s.endswith(".csv")       # 判断结尾
 
 ---
 
-## 三、lambda匿名函数
+## 四、lambda匿名函数
 
 ### 格式
 ```python
@@ -89,7 +140,7 @@ sorted(data, key=lambda x: x[1])
 
 ---
 
-## 四、sorted排序
+## 五、sorted排序
 
 ### 格式
 ```python
@@ -116,7 +167,7 @@ sorted(data, key=lambda x: (x[0], x[1]))
 
 ---
 
-## 五、面向对象
+## 六、面向对象
 
 ### 基本格式
 ```python
@@ -154,7 +205,7 @@ class SearchAd(Ad):  # 继承Ad
 
 ---
 
-## 六、生成器（Generator）
+## 七、生成器（Generator）
 
 ### 列表 vs 生成器
 ```python
@@ -180,7 +231,7 @@ def read_lines(file_path):
 
 ---
 
-## 七、with语句
+## 八、with语句
 
 ### 作用
 自动做收尾工作（关文件、关连接、释放锁），不管出不出错都会执行。
@@ -199,7 +250,7 @@ with pymysql.connect(...) as conn:
 
 ---
 
-## 八、常用内置函数
+## 九、常用内置函数
 
 | 函数 | 作用 |
 |------|------|
