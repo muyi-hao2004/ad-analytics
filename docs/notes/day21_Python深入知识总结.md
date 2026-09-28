@@ -265,3 +265,39 @@ with pymysql.connect(...) as conn:
 | `type()` | 看类型 |
 | `isinstance()` | 判断类型 |
 | `int()` / `float()` / `str()` | 类型转换 |
+
+---
+
+## 十、常用类型转换
+
+### 数字和字符串互转
+```python
+int("123")      # 字符串转整数
+float("3.14")   # 字符串转小数
+str(123)        # 数字转字符串
+```
+
+### 列表和元组互转
+```python
+tuple([1, 2, 3])  # 列表转元组
+list((1, 2, 3))   # 元组转列表
+```
+
+### 字典转列表
+```python
+list(d.keys())     # key列表
+list(d.values())   # value列表
+list(d.items())    # (key, value)元组列表
+```
+
+### 列表和字符串互转
+```python
+"Facebook,Google".split(",")     # 字符串转列表
+",".join(["Facebook", "Google"]) # 列表转字符串
+```
+
+### 其他
+```python
+list(set([1, 2, 2, 3]))  # 列表去重（顺序会乱）
+bool(0)                  # 转布尔值
+```
