@@ -51,6 +51,10 @@ data/processed/*
 logs/
 *.log
 
+# 向量数据库落盘数据（运行产物，不提交）
+chroma_db/
+chroma/
+
 # Jupyter Notebook
 .ipynb_checkpoints/
 */.ipynb_checkpoints/*
@@ -63,6 +67,17 @@ Thumbs.db
 .coverage
 htmlcov/
 .pytest_cache/
+
+# Airflow（依赖与缓存不提交，只保留 DAG 源码）
+airflow/venv/
+airflow/**/__pycache__/
+airflow/logs/
+airflow/*.db
+airflow/*.cfg
+
+# 个人隐私 / 临时文件（不提交）
+docs/project_summary_for_cv.md
+*.png
 
 # Docker
 docker-compose.override.yml

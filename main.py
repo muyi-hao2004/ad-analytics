@@ -215,8 +215,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-# 配置用户名（用你的GitHub用户名）
-git config --global user.name "muyi-hao2004"
-
-# 配置邮箱（用你注册GitHub的邮箱）
-git config --global user.email "meinvmuyi214@gmail.com"
