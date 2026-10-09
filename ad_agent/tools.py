@@ -3,19 +3,30 @@
 所有Agent可以调用的工具都在这里
 """
 
+import os
+
 import pymysql
 import pandas as pd
 from datetime import datetime, timedelta
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:  # 未安装 python-dotenv 时静默跳过，仍可用系统环境变量
+    pass
+
 # ============================================================
-# 数据库连接配置
+# 数据库连接配置（从环境变量读取，绝不硬编码密码）
+# 默认值仅用于本地开发兜底；部署时务必通过 .env 或系统环境变量注入。
 # ============================================================
 DB_CONFIG = {
-    "host": "localhost",
-    "user": "root",
-    "password": "123456",
-    "database": "ad_analytics",
-    "charset": "utf8mb4"
+    "host": os.getenv("DB_HOST", "localhost"),
+    "port": int(os.getenv("DB_PORT", "3306")),
+    "user": os.getenv("DB_USER", "root"),
+    "password": os.getenv("DB_PASSWORD", ""),
+    "database": os.getenv("DB_NAME", "ad_analytics"),
+    "charset": os.getenv("DB_CHARSET", "utf8mb4"),
 }
 
 
