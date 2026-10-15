@@ -49,7 +49,7 @@
 
 ```
 ad-analytics/
-├── iaa_bi/                          # ★ IAA 中台（核心项目）
+├── iaa-analytics-agent/                          # ★ IAA 中台（核心项目）
 │   ├── src/
 │   │   ├── config.py                # 全局配置（路径/字段/业务常量）
 │   │   ├── warehouse.py             # 四层数仓（ODS/DWD/DWS/ADS）
@@ -84,7 +84,7 @@ ad-analytics/
 ### 2. 初始化数仓 + 知识库
 
 ```bash
-cd iaa_bi/src
+cd iaa-analytics-agent/src
 
 # 建四层数仓 + 维度表（含 SCD2）
 python init_campaign_dims.py
@@ -97,16 +97,16 @@ python init_knowledge.py
 ### 3. 跑数据分析 Agent
 
 ```bash
-cd iaa_bi/src
+cd iaa-analytics-agent/src
 python demo_multi_round.py    # 多轮 Function Calling 演示
 ```
 
-配置 `.env`（参考 `iaa_bi/.env`）：`LLM_API_KEY`（deepseek）等。
+配置 `.env`（参考 `iaa-analytics-agent/.env`）：`LLM_API_KEY`（deepseek）等。
 
 ### 4. 启动 Airflow（Docker）
 
 ```bash
-cd iaa_bi
+cd iaa-analytics-agent
 docker compose up -d
 # Web UI: http://localhost:8080 (admin/admin)
 # 每日 08:00 自动跑 update_warehouse → run_agent
@@ -115,7 +115,7 @@ docker compose up -d
 ### 5. 启动后端 API
 
 ```bash
-cd iaa_bi/src
+cd iaa-analytics-agent/src
 python app.py    # FastAPI，含 /api/agent 等接口
 ```
 
@@ -147,7 +147,7 @@ python app.py    # FastAPI，含 /api/agent 等接口
 
 ## 📄 参考文档
 
-- `iaa_bi/data_dictionary.md` — 数据字典（15 字段口径、指标定义）
+- `iaa-analytics-agent/data_dictionary.md` — 数据字典（15 字段口径、指标定义）
 - `learning/notes/` — 学习过程笔记（day02~day21）
 
 ## 👤 作者

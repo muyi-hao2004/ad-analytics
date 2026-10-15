@@ -624,7 +624,7 @@ def _make_client():
     base_url = os.getenv("LLM_BASE_URL")
     if not api_key or not base_url:
         raise RuntimeError(
-            "未配置 LLM。请在 iaa_bi/.env 里设置 LLM_API_KEY、LLM_BASE_URL、LLM_MODEL。\n"
+            "未配置 LLM。请在 iaa-analytics-agent/.env 里设置 LLM_API_KEY、LLM_BASE_URL、LLM_MODEL。\n"
             "例如：\n"
             "  LLM_API_KEY=sk-xxx\n"
             "  LLM_BASE_URL=https://api.deepseek.com\n"

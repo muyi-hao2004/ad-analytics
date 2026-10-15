@@ -13,7 +13,7 @@ from pathlib import Path
 # ============================================================
 # 路径常量
 # ============================================================
-# 项目根目录（iaa_bi/）
+# 项目根目录（iaa-analytics-agent/）
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
 # 数据目录
@@ -108,13 +108,13 @@ D7_ROAS_TARGET = 0.70   # 70%
 # ============================================================
 # 渠道账号配置（各广告平台的登录凭据，从 .env 读取，不硬编码）
 # ============================================================
-# 注意：真实密码绝不写进代码，放在 iaa_bi/.env 里，通过环境变量读。
+# 注意：真实密码绝不写进代码，放在 iaa-analytics-agent/.env 里，通过环境变量读。
 # 不同渠道有不同账号密码，所以按渠道名分组。
 
 import os
 from dotenv import load_dotenv
 
-load_dotenv(PROJECT_ROOT / ".env")   # 加载 iaa_bi/.env（如果存在）
+load_dotenv(PROJECT_ROOT / ".env")   # 加载 iaa-analytics-agent/.env（如果存在）
 
 # 渠道 → 登录配置 的映射
 CHANNEL_CREDENTIALS = {

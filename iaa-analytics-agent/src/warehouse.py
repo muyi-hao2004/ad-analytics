@@ -10,7 +10,7 @@ IAA 广告变现分析中台 —— 四层数仓（ODS → DWD → DWS → ADS�
 
 存储用 Parquet（列式存储，数仓标准格式）。
 运行：
-    cd iaa_bi
+    cd iaa-analytics-agent
     venv/Scripts/python.exe src/warehouse.py
 """
 

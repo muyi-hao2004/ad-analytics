@@ -9,7 +9,7 @@
 这样「跑完直接生成看板」就成立：一条命令，从数据到决策到可视化全链路。
 
 运行：
-    cd iaa_bi
+    cd iaa-analytics-agent
     python src/run_agent_dashboard.py            # dry_run 模式（只分析）
     python src/run_agent_dashboard.py --execute  # 真正执行写操作
 """

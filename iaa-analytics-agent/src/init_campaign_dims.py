@@ -9,7 +9,7 @@
 与结果数据通道（API 推送 → 四层数仓）分开。用 operator=None 静默写入，不污染操作日志。
 
 运行：
-    cd iaa_bi
+    cd iaa-analytics-agent
     venv/Scripts/python.exe src/init_campaign_dims.py
 """
 

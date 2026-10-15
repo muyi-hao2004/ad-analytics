@@ -12,7 +12,7 @@
 #
 # 关键映射：
 #   ./dags  -> 容器 /opt/airflow/dags    (DAG 文件)
-#   ./      -> 容器 /opt/airflow/iaa_bi  (整个项目，供 DAG import src)
+#   ./      -> 容器 /opt/airflow/iaa-analytics-agent  (整个项目，供 DAG import src)
 #
 # 启动：docker compose up -d
 
@@ -34,7 +34,7 @@ x-airflow-common: &airflow-common
   user: "50000:0"
   volumes:
     - ./dags:/opt/airflow/dags
-    - ./:/opt/airflow/iaa_bi
+    - ./:/opt/airflow/iaa-analytics-agent
     - airflow_logs:/opt/airflow/logs
 
 services:

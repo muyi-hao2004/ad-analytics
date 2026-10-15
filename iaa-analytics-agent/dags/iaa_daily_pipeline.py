@@ -25,10 +25,10 @@ from airflow.operators.python import PythonOperator
 
 # 把 src 加进 sys.path，让 DAG 能 import 项目的 src 模块。
 # 兼容两种运行环境：
-#   1. Docker 容器内：整个项目挂载在 /opt/airflow/iaa_bi_src，src 在其下
-#   2. 本地 Windows：dags 的上一级（iaa_bi）下就是 src
+#   1. Docker 容器内：整个项目挂载在 /opt/airflow/iaa-analytics-agent_src，src 在其下
+#   2. 本地 Windows：dags 的上一级（iaa-analytics-agent）下就是 src
 _SRC_CANDIDATES = [
-    Path("/opt/airflow/iaa_bi/src"),                            # Docker 容器
+    Path("/opt/airflow/iaa-analytics-agent/src"),                            # Docker 容器
     Path(__file__).resolve().parent.parent / "src",            # 本地
 ]
 for _cand in _SRC_CANDIDATES:

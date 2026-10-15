@@ -11,7 +11,7 @@
 而不是「你喂什么它就只能看什么」。
 
 运行：
-    cd iaa_bi
+    cd iaa-analytics-agent
     D:/python/python.exe src/demo_multi_round.py
 """
 

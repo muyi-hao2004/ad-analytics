@@ -7,7 +7,7 @@ SCD Type 2 演示脚本
   3. 查询"历史某天"的值 → 能查到旧值（不会被新值覆盖）
 
 运行：
-    cd iaa_bi
+    cd iaa-analytics-agent
     venv/Scripts/python.exe src/demo_scd.py
 """
 

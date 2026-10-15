@@ -12,7 +12,7 @@
   平台操作层  MockPlatform（现在）/ UnityPlatform（将来）
 
 运行：
-    cd iaa_bi
+    cd iaa-analytics-agent
     venv/Scripts/python.exe -m uvicorn src.app:app --reload --port 8000
 
 然后浏览器打开 http://127.0.0.1:8000 就能看到带"真操作"的中台。

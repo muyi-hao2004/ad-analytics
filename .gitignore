@@ -54,7 +54,7 @@ logs/
 # 向量数据库落盘数据（运行产物，不提交）
 chroma_db/
 chroma/
-iaa_bi/data/chroma_kb/
+iaa-analytics-agent/data/chroma_kb/
 
 # Jupyter Notebook
 .ipynb_checkpoints/
@@ -77,13 +77,13 @@ airflow/*.db
 airflow/*.cfg
 
 # IAA 中台：本地虚拟环境 + 运行产物（不提交）
-iaa_bi/airflow_env/
-iaa_bi/airflow_home/
-iaa_bi/data/dim.db
-iaa_bi/data/raw/
-iaa_bi/data/warehouse/
-iaa_bi/models/
-iaa_bi/**/__pycache__/
+iaa-analytics-agent/airflow_env/
+iaa-analytics-agent/airflow_home/
+iaa-analytics-agent/data/dim.db
+iaa-analytics-agent/data/raw/
+iaa-analytics-agent/data/warehouse/
+iaa-analytics-agent/models/
+iaa-analytics-agent/**/__pycache__/
 
 # 个人隐私 / 临时文件（不提交）
 docs/project_summary_for_cv.md

@@ -8,7 +8,7 @@
      带脏数据的造数脚本（生成脏数据）后面单独做。
 
 运行：
-    cd iaa_bi
+    cd iaa-analytics-agent
     venv/Scripts/python.exe src/prepare_report_data.py
 """
 

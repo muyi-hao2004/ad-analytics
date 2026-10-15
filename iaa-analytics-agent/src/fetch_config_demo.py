@@ -5,7 +5,7 @@
 这是「配置数据独立接入」的演示：结果数据和配置数据走两条通道。
 
 运行方式：
-    cd iaa_bi
+    cd iaa-analytics-agent
     venv/Scripts/python.exe src/fetch_config_demo.py
 """
 

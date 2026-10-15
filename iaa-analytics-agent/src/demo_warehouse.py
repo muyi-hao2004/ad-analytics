@@ -9,7 +9,7 @@ ODS → DWD 清洗演示（教学用）
   5. 类型规范
 
 运行：
-    cd iaa_bi
+    cd iaa-analytics-agent
     venv/Scripts/python.exe src/demo_warehouse.py
 """
 

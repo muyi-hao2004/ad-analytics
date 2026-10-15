@@ -11,7 +11,7 @@
   - 红涨绿跌（ROI 达标标红，不达标标绿）
 
 运行：
-    cd iaa_bi
+    cd iaa-analytics-agent
     venv/Scripts/python.exe src/build_report.py
 """
 
