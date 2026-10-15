@@ -7,8 +7,8 @@
   - 行业经验是「文本」，靠语义匹配检索，SQL 查不了 → 用 RAG
 
 设计原则（可插拔）：
-  - 嵌入层做成接口，默认用 chromadb 内置 MiniLM（英文模型，中文效果一般但能跑通）
-  - 以后网络允许，可换成 bge-m3 等中文嵌入模型，检索质量提升，但调用方代码不用改
+  - 嵌入层做成接口，默认用 bge-m3（中文检索最强之一），失败回退 MiniLM 兜底
+  - bge-m3 走 hf-mirror 镜像下载（国内直连 HF 不通时），约 2.27GB
   - 分块、检索、top_k 都参数化
 
 分层：
@@ -101,15 +101,41 @@ def _split_long(text: str, max_chunk: int) -> List[str]:
     return result
 
 
+def bge_m3_embedding_fn():
+    """
+    bge-m3 中文嵌入函数（推荐，默认）。
+
+    bge-m3（BAAI）是当前最强的中文检索嵌入模型之一，多语言、支持稠密+稀疏+多向量，
+    中文语义效果远好于 MiniLM。通过 sentence_transformers 加载。
+
+    注意：
+    - 首次运行会从 HuggingFace 下载约 2.27GB 权重（国内用 hf-mirror 镜像）
+    - 需要先 pip install sentence-transformers
+    """
+    import os
+    # 国内直连 HF 不通时走镜像；已能直连则此设置无害
+    os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+
+    from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+    return SentenceTransformerEmbeddingFunction(
+        model_name="BAAI/bge-m3",
+        # 中文查询建议加前缀，bge 系列官方推荐的 query 指令
+        normalize_embeddings=True,
+    )
+
+
 def _default_embedding_fn():
     """
-    默认嵌入函数：用 chromadb 内置的 sentence-transformers 模型。
+    默认嵌入函数：优先 bge-m3，失败则回退到 chromadb 内置 MiniLM（英文兜底）。
 
-    注意：默认 MiniLM 是英文模型，中文语义效果一般。这是「能跑通」的兜底，
-    后续可替换为中文模型（如 bge-m3）而不改调用方代码。
+    调用方无需关心用哪个，保证「能跑通」。
     """
-    import chromadb.utils.embedding_functions as ef
-    return ef.DefaultEmbeddingFunction()
+    try:
+        return bge_m3_embedding_fn()
+    except Exception as e:
+        print(f"[knowledge_base] bge-m3 加载失败，回退 MiniLM 兜底：{e}")
+        import chromadb.utils.embedding_functions as ef
+        return ef.DefaultEmbeddingFunction()
 
 
 def build_knowledge(embedding_fn=None, collection_name: str = "iaa_optimization") -> Dict[str, Any]:
