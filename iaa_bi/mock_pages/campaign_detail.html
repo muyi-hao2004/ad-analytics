@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>系列详情 - 国家配置</title>
+    <style>
+        body { font-family: sans-serif; margin: 40px; background: #f5f5f5; }
+        h1 { font-size: 20px; }
+        .meta { color: #666; margin-bottom: 20px; }
+        table { border-collapse: collapse; background: #fff; width: 700px; }
+        th, td { border: 1px solid #ddd; padding: 10px 14px; text-align: left; }
+        th { background: #f0f0f0; }
+        .back { color: #185fa5; margin-bottom: 20px; display: block; }
+    </style>
+</head>
+<body>
+    <a class="back" href="campaign_list.html">← 返回列表</a>
+
+    <div id="campaign-info">
+        <h1>系列：<span id="campaign-name">-</span></h1>
+        <div class="meta">
+            策略类型：<span id="strategy">-</span> ｜
+            投放人：<span id="owner">-</span>
+        </div>
+    </div>
+
+    <table id="country-config-table">
+        <tr>
+            <th>国家</th>
+            <th>预算（美元）</th>
+            <th>目标值</th>
+        </tr>
+    </table>
+
+    <h2 style="margin-top: 30px;">素材选择</h2>
+    <div id="creative-list"></div>
+
+    <script>
+        // 模拟后台数据：不同系列有不同配置（真实环境这是后台接口返回的）
+        const DATA = {
+            "US_A_01": {
+                strategy: "D7_ROAS",
+                owner: "张三",
+                countries: [
+                    { country: "US", budget: 1000, target: "70%" },
+                    { country: "CA", budget: 500,  target: "72%" },
+                    { country: "JP", budget: 300,  target: "65%" },
+                ],
+                creatives: [
+                    { id: "creative_a", name: "素材A（激励视频 · 竖版）", checked: true },
+                    { id: "creative_b", name: "素材B（激励视频 · 横版）", checked: false },
+                    { id: "creative_c", name: "素材C（插屏 · 竖版）", checked: false },
+                    { id: "creative_d", name: "素材D（banner）", checked: false },
+                ],
+            },
+            "US_B_01": {
+                strategy: "CPI",
+                owner: "李四",
+                countries: [
+                    { country: "US", budget: 800,  target: "0.5" },
+                    { country: "GB", budget: 400,  target: "0.6" },
+                ],
+                creatives: [
+                    { id: "creative_a", name: "素材A（激励视频 · 竖版）", checked: true },
+                    { id: "creative_c", name: "素材C（插屏 · 竖版）", checked: true },
+                    { id: "creative_d", name: "素材D（banner）", checked: false },
+                ],
+            },
+            "US_C_01": {
+                strategy: "D0_ROAS",
+                owner: "王五",
+                countries: [
+                    { country: "US", budget: 1200, target: "40%" },
+                    { country: "AU", budget: 600,  target: "45%" },
+                ],
+                creatives: [
+                    { id: "creative_b", name: "素材B（激励视频 · 横版）", checked: true },
+                    { id: "creative_d", name: "素材D（banner）", checked: false },
+                ],
+            },
+        };
+
+        // 从 URL 读取 ?campaign=xxx，决定显示哪个系列
+        const params = new URLSearchParams(window.location.search);
+        const campaign = params.get("campaign") || "US_A_01";
+        const data = DATA[campaign] || DATA["US_A_01"];
+
+        // 填充系列信息
+        document.getElementById("campaign-name").textContent = campaign;
+        document.getElementById("strategy").textContent = data.strategy;
+        document.getElementById("owner").textContent = data.owner;
+
+        // 填充国家配置表
+        const table = document.getElementById("country-config-table");
+        for (const c of data.countries) {
+            const tr = document.createElement("tr");
+            tr.innerHTML = `<td>${c.country}</td><td>${c.budget}</td><td>${c.target}</td>`;
+            table.appendChild(tr);
+        }
+
+        // 填充素材选择
+        const creativeList = document.getElementById("creative-list");
+        for (const cr of data.creatives) {
+            const label = document.createElement("label");
+            label.innerHTML = `<input type="checkbox" class="creative" value="${cr.id}" ${cr.checked ? "checked" : ""}> ${cr.name}`;
+            label.appendChild(document.createElement("br"));
+            creativeList.appendChild(label);
+        }
+    </script>
+</body>
+</html>

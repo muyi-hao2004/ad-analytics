@@ -1,0 +1,98 @@
+# IAA 广告变现中台 —— Airflow Docker 编排（Postgres 元数据库版）
+#
+# 元数据库：Postgres 13（独立服务，数据持久化到命名卷 postgres_db）
+# 执行器：LocalExecutor（支持任务并行；SQLite 只能用 SequentialExecutor 串行）
+#
+# 服务组成：
+#   postgres      —— 元数据库（存 DAG 运行记录、任务状态等）
+#   airflow-init  —— 一次性初始化元数据库 + 创建 admin 用户（跑完自动退出）
+#   scheduler     —— 调度器：按 cron 触发 DAG、派发任务
+#   webserver     —— Web UI（http://localhost:8080，账号 admin/admin）
+#   triggerer     —— 处理可延迟任务
+#
+# 关键映射：
+#   ./dags  -> 容器 /opt/airflow/dags    (DAG 文件)
+#   ./      -> 容器 /opt/airflow/iaa_bi  (整个项目，供 DAG import src)
+#
+# 启动：docker compose up -d
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    AIRFLOW_UID: "50000"
+    # 项目业务环境变量（DAG 里 agent.py 会读这些调 deepseek）
+    LLM_API_KEY: ${LLM_API_KEY:-}
+    LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
+    LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
+    AGENT_RUN_TIME: ${AGENT_RUN_TIME:-09:00}
+  user: "50000:0"
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./:/opt/airflow/iaa_bi
+    - airflow_logs:/opt/airflow/logs
+
+services:
+  postgres:
+    image: docker.1panel.live/library/postgres:13
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+    restart: always
+
+  airflow-init:
+    <<: *airflow-common
+    user: "0:0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      bash -c "airflow db migrate && airflow users create --username admin --firstname Admin --lastname User --role Admin --email admin@example.com --password admin"
+
+  scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    restart: always
+
+  webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    restart: always
+
+  triggerer:
+    <<: *airflow-common
+    command: triggerer
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    restart: always
+
+volumes:
+  postgres_db:
+  airflow_logs:

@@ -1,16 +1,20 @@
 """
 数据加载模块
-支持从CSV文件和API两种方式加载广告投放数据，并进行数据验证。
+支持从 CSV / Parquet / API 三种方式加载广告投放数据，并进行数据验证。
+统一入口：load_data(source_type, path)
 """
 
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import pandas as pd
 import requests
 
 from .config import settings, PROJECT_ROOT
 from .logger import logger
+
+# 支持的三种数据源类型
+SUPPORTED_SOURCE_TYPES = ("csv", "parquet", "api")
 
 # 数据的标准列名和类型
 EXPECTED_COLUMNS = {
@@ -75,6 +79,80 @@ def load_from_csv(
     logger.info(f"数据验证报告: {validation_report}")
 
     return df
+
+
+def load_from_parquet(
+    file_path: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    从 Parquet 文件加载广告投放数据。
+
+    Parquet 是列式存储格式，优势：
+    1. 按列存储，读取时只读需要的列（省内存、快）
+    2. 自带压缩，文件比 CSV 小很多
+    3. 保存时记住每列的数据类型，读回来不用重新转换
+    4. Spark / Hive 等大数据框架原生支持
+
+    Args:
+        file_path: Parquet 文件路径，默认为 data/raw/sample_ad_data.parquet
+
+    Returns:
+        加载并验证后的 DataFrame
+    """
+    if file_path is None:
+        file_path = PROJECT_ROOT / 'data' / 'raw' / 'sample_ad_data.parquet'
+
+    file_path = Path(file_path)
+
+    if not file_path.exists():
+        logger.error(f"数据文件不存在: {file_path}")
+        raise FileNotFoundError(f"数据文件不存在: {file_path}")
+
+    logger.info(f"开始从Parquet加载数据: {file_path}")
+
+    df = pd.read_parquet(file_path)
+
+    logger.info(f"Parquet加载完成，共 {len(df)} 行，{len(df.columns)} 列")
+
+    # 验证数据
+    validation_report = validate_data(df)
+    logger.info(f"数据验证报告: {validation_report}")
+
+    return df
+
+
+def load_data(
+    source_type: str,
+    file_path: Optional[str] = None,
+    **kwargs,
+) -> pd.DataFrame:
+    """
+    统一数据加载入口，根据 source_type 自动分发到对应加载函数。
+
+    这是数仓 ODS 层的统一接入口，业务侧只需要调这一个函数，
+    就能支持 CSV / Parquet / API 三种来源。
+
+    Args:
+        source_type: 数据源类型，取值 'csv' / 'parquet' / 'api'
+        file_path: 文件路径（csv / parquet 时必填；api 时忽略）
+        **kwargs: 透传给具体加载函数的参数
+            - csv: encoding
+            - api: start_date, end_date, api_url, api_token, timeout
+
+    Returns:
+        加载并验证后的 DataFrame
+    """
+    source_type = (source_type or "").strip().lower()
+
+    if source_type == "csv":
+        return load_from_csv(file_path=file_path, **kwargs)
+    elif source_type == "parquet":
+        return load_from_parquet(file_path=file_path, **kwargs)
+    elif source_type == "api":
+        return load_from_api(**kwargs)
+    else:
+        logger.error(f"不支持的数据源类型: {source_type}，支持: {SUPPORTED_SOURCE_TYPES}")
+        raise ValueError(f"不支持的数据源类型: {source_type}，支持: {SUPPORTED_SOURCE_TYPES}")
 
 
 def load_from_api(

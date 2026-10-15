@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent 决策看板</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+         background: #f5f6f8; color: #1f1f1f; padding: 24px; line-height: 1.6; }
+  .wrap { max-width: 960px; margin: 0 auto; }
+  .header { background: #fff; border-radius: 12px; padding: 24px; margin-bottom: 16px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+  .header h1 { font-size: 22px; font-weight: 700; }
+  .header .sub { font-size: 13px; color: #888; margin-top: 6px; }
+  .mode-tag { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 12px;
+              font-weight: 600; margin-left: 8px; vertical-align: middle; }
+  .mode-dry { background: #fff7e6; color: #d48806; }
+  .mode-exec { background: #f6ffed; color: #389e0d; }
+
+  .card { background: #fff; border-radius: 12px; padding: 22px; margin-bottom: 16px;
+          box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+  .card h2 { font-size: 15px; font-weight: 700; margin-bottom: 14px; padding-left: 10px;
+             border-left: 4px solid #2c5f8a; }
+
+  .conclusion { font-size: 15px; font-weight: 600; color: #1f1f1f; }
+  .reasoning { font-size: 13px; color: #444; background: #fafbfc; border-radius: 8px;
+               padding: 14px 16px; }
+
+  .step { border: 1px solid #eef0f2; border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; }
+  .step-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .round { font-size: 12px; color: #888; font-weight: 600; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 6px; font-size: 12px; font-weight: 600; }
+  .badge.tool { background: #eef4fb; color: #2c5f8a; }
+  .badge.finish { background: #f6ffed; color: #389e0d; }
+  .badge.warn { background: #fff1f0; color: #cf1322; }
+  .badge.action { background: #fff7e6; color: #d48806; }
+  .tool-name { font-size: 14px; font-weight: 600; }
+  .step-body { margin-left: 4px; }
+  .kv { display: flex; gap: 10px; margin-bottom: 4px; font-size: 13px; }
+  .kv .k { color: #888; min-width: 40px; flex-shrink: 0; }
+  .kv .v { color: #333; }
+  .mono { font-family: 'SF Mono', Consolas, monospace; font-size: 12.5px; }
+
+  .action-row { border-left: 3px solid #d48806; padding: 10px 14px; margin-bottom: 10px;
+                background: #fafbfc; border-radius: 0 8px 8px 0; }
+  .action-title { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+  .exec-mark { font-size: 12px; color: #888; }
+  .action-reason { font-size: 13px; color: #555; }
+
+  .empty { color: #999; text-align: center; padding: 20px; font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="header">
+    <h1>Agent 决策看板<span class="mode-tag mode-dry">dry_run · 仅分析未执行</span></h1>
+    <div class="sub">海外网赚类 IAA · 多轮 Function Calling Agent · 共 6 轮 · 可解释性轨迹</div>
+  </div>
+
+  <div class="card">
+    <h2>结论</h2>
+    <div class="conclusion">所有低效子渠道（ch_002/ch_003/ch_004）均已被删除，ch_001 表现健康（D7 ROI 稳定在 0.82-0.96，高于 70% 目标），无需重复操作，本轮不做任何调整。</div>
+  </div>
+
+  <div class="card">
+    <h2>推理链（为什么这么决策）</h2>
+    <div class="reasoning">1) 子渠道层面：ch_002（10.37%）、ch_003（24.93%）、ch_004（3.19%）D7 ROI 均远低于 70% 目标，但通过 get_logs 确认这三个渠道在 2026-10-14 已被 agent 删除（log 9/14/8），属于重复操作，不应再次删除。2) ch_001 聚合 D7 ROI 为 91.08%，看似健康，但日志显示它也曾被批量删除（log 7），因此下钻查其每日明细：8 天 D7 ROI 稳定在 0.82-0.96 之间，无暴跌，是优质流量，不应删除。3) 素材层面：crt_005（1.48%）、crt_002（3.70%）、crt_004（9.64%）D7 ROI 偏低，但工具清单中没有删除/调整素材的写操作接口，且 crt_002 已被李四在 US_B_01 中替换为 crt_001（log 4），无法也不应通过现有工具处理。4) 配置层面：US_A_01 的 US 目标值已在 log 11-13 中被反复调整，当前为 0.7，与业务目标 70% 一致，无需再调；预算 1500 也未显示异常。综上，所有可执行的优化动作均已完成或已到位，本轮无新增操作。</div>
+  </div>
+
+  <div class="card">
+    <h2>决策轨迹（每轮查了什么 / 返回了什么）</h2>
+    
+        <div class="step">
+          <div class="step-head">
+            <span class="round">第 1 轮</span>
+            <span class="badge tool">调工具</span>
+            <span class="tool-name">查操作历史</span>
+          </div>
+          <div class="step-body">
+            <div class="kv"><span class="k">参数</span><span class="v mono">关键词=ch_003 · limit=10</span></div>
+            <div class="kv"><span class="k">返回</span><span class="v mono">匹配到 1 条历史记录</span></div>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-head">
+            <span class="round">第 2 轮</span>
+            <span class="badge tool">调工具</span>
+            <span class="tool-name">查操作历史</span>
+          </div>
+          <div class="step-body">
+            <div class="kv"><span class="k">参数</span><span class="v mono">关键词=ch_002 · limit=10</span></div>
+            <div class="kv"><span class="k">返回</span><span class="v mono">匹配到 1 条历史记录</span></div>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-head">
+            <span class="round">第 3 轮</span>
+            <span class="badge tool">调工具</span>
+            <span class="tool-name">查操作历史</span>
+          </div>
+          <div class="step-body">
+            <div class="kv"><span class="k">参数</span><span class="v mono">关键词=ch_004 · limit=10</span></div>
+            <div class="kv"><span class="k">返回</span><span class="v mono">匹配到 2 条历史记录</span></div>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-head">
+            <span class="round">第 4 轮</span>
+            <span class="badge tool">调工具</span>
+            <span class="tool-name">查操作历史</span>
+          </div>
+          <div class="step-body">
+            <div class="kv"><span class="k">参数</span><span class="v mono">关键词=ch_001 · limit=10</span></div>
+            <div class="kv"><span class="k">返回</span><span class="v mono">匹配到 1 条历史记录</span></div>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-head">
+            <span class="round">第 5 轮</span>
+            <span class="badge tool">调工具</span>
+            <span class="tool-name">查指标明细</span>
+          </div>
+          <div class="step-body">
+            <div class="kv"><span class="k">参数</span><span class="v mono">对象=sub_channel · ID=ch_001 · 指标=d7_roi · 天数=8</span></div>
+            <div class="kv"><span class="k">返回</span><span class="v mono">d7_roi: 0.8387948439198634, 0.9496143527833668, 0.9206734867860188, 0.9613372350802519, 0.8217827089028247, 0.929125816993464, 0.9333928482864653, 0.9405059337913804</span></div>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-head">
+            <span class="round">第 6 轮</span>
+            <span class="badge finish">给决策</span>
+            <span class="tool-name">分析完成</span>
+          </div>
+        </div>
+  </div>
+
+  <div class="card">
+    <h2>最终动作</h2>
+    <div class="empty">本轮无写操作（无需优化）</div>
+  </div>
+</div>
+</body>
+</html>
