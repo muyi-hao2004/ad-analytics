@@ -1,0 +1,112 @@
+# ============================================================
+# 语义层（Semantic Layer）：IAA 中台的核心指标口径定义
+# ============================================================
+# 这是 2026 年「数仓 Agent」最重要的资产：把业务口径从代码里抽出来，
+# 声明式地写在这里，让 Agent（或任何调用方）在动手算数之前，
+# 先拿到「这个指标到底怎么定义、怎么算、依赖哪些字段」。
+#
+# 作用：解决「同名不同义」和「口径不一致」两大坑 ——
+#   Agent 不再对着裸表猜 "ROAS 怎么算"，而是先查这里拿标准答案。
+#
+# 设计原则（与 dbt Semantic Layer / Cube / Snowflake Cortex 一致）：
+#   1. 只存「派生指标」的公式，原子字段由数仓保证（只存原子，派生用时算）
+#   2. 每个指标写清：定义 / 公式 / 依赖字段 / 口径备注 / 所属轨道
+#   3. 口径是「业务资产」，像数据一样被管理、被版本控制，而不是埋在代码里
+#
+# 与 data_dictionary.md 一一对应，互为参照。
+# ============================================================
+
+# 全局业务背景（Agent 判断「要不要优化」的基准线）
+business:
+  market: "美国 T0"
+  product: "海外网赚类 IAA 休闲游戏（纯广告变现，无内购）"
+  d7_roas_target: 0.70          # D7 ROAS 目标 70%
+  d7_roas_target_note: "D7 ROAS 低于 0.70 说明变现效率不足，需要优化"
+
+# 轨道：IAA 是「买量 + 变现」双轨，同名指标口径不同
+tracks:
+  acquisition:
+    name: "买量侧（Acquisition）"
+    concern: "怎么把用户买进来"
+    note: "时间轴单轴（report_date），无 cohort 概念"
+  monetization:
+    name: "变现侧（Monetization）"
+    concern: "用户进来怎么赚钱"
+    note: "时间轴双轴（install_date + report_date），cohort 口径"
+
+# ============================================================
+# 核心指标定义
+# ============================================================
+metrics:
+
+  d7_roas:
+    name: "D7 回报率（D7 ROAS）"
+    track: monetization
+    definition: "安装后 7 天窗口内，累计广告收入 / 累计广告花费"
+    formula: "SUM(ad_revenue) / SUM(spend)  WHERE 日期 in [install_date, install_date+6]"
+    fields: [ad_revenue, spend, install_date]
+    note: "退款已剔除，只算已归因收入；低于 0.70 需要优化"
+    usage: "判断某批用户/某素材/某子渠道的变现效率，是删不删素材、调不调预算的核心依据"
+
+  cpi:
+    name: "安装成本（CPI）"
+    track: acquisition
+    definition: "每获取一个安装的平均花费"
+    formula: "spend / installs"
+    fields: [spend, installs]
+    note: "买量侧指标；越低越好，反映买量效率"
+
+  buy_ctr:
+    name: "买量点击率（买量 CTR）"
+    track: acquisition
+    definition: "投放的广告被点击的比例"
+    formula: "clicks / buy_impressions"
+    fields: [clicks, buy_impressions]
+    note: "买量侧 CTR，分母是 buy_impressions（我们投放的广告被展示），不是 ad_impressions"
+
+  buy_cvr:
+    name: "买量转化率（买量 CVR）"
+    track: acquisition
+    definition: "点击后转化为安装的比例"
+    formula: "installs / clicks"
+    fields: [installs, clicks]
+    note: "买量侧 CVR"
+
+  buy_ecpm:
+    name: "买量 eCPM（成本视角）"
+    track: acquisition
+    definition: "每千次展示的买量成本"
+    formula: "spend / buy_impressions * 1000"
+    fields: [spend, buy_impressions]
+    note: "成本视角；⚠️ 与变现 eCPM 同名不同义，绝不可混用"
+
+  monetization_ecpm:
+    name: "变现 eCPM（收入视角）"
+    track: monetization
+    definition: "每千次广告展示带来的收入"
+    formula: "ad_revenue / ad_impressions * 1000"
+    fields: [ad_revenue, ad_impressions]
+    note: "收入视角；分母是 ad_impressions（用户看的广告），与买量 eCPM 不同"
+
+  d7_retention:
+    name: "D7 留存率"
+    track: monetization
+    definition: "安装后第 7 天仍活跃的用户占比"
+    formula: "active_users(install_date+6) / installs"
+    fields: [active_users, installs]
+    note: "衡量用户质量，D7 留存高说明用户粘性好"
+
+  rewarded_views_per_user:
+    name: "人均观次"
+    track: monetization
+    definition: "用户主动观看激励视频的平均次数"
+    formula: "rewarded_views / active_users"
+    fields: [rewarded_views, active_users]
+    note: "观次 = 用户主动看激励视频的次数；反映激励视频变现潜力"
+
+# ============================================================
+# 派生指标「是否入库」约定：只存原子，派生用时算
+# ============================================================
+storage_principle:
+  rule: "事实表只存原子字段（installs/active_users/ad_impressions/rewarded_views/ad_revenue/spend/clicks/buy_impressions），派生指标一律不落库，查询时按公式现算"
+  reason: "避免口径漂移、节省存储、保证全局一致"

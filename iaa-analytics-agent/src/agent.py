@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import config
 import dim_scd
 import knowledge_base
+import semantic_layer
 from dotenv import load_dotenv
 
 load_dotenv(config.PROJECT_ROOT / ".env")
@@ -343,6 +344,25 @@ TOOLS_DEFINITION = [
             "required": ["query"],
         },
     },
+    {
+        "name": "get_metric_definition",
+        "description": "查「指标的标准口径定义」——返回指标的准确公式、依赖字段、口径备注。"
+                       "触发场景（重要，判断口径时必查）：当你需要用某个指标做判断、且不确定它的精确算法时，"
+                       "必须先调本工具拿标准定义，而不是按字面猜。例如「D7 ROAS 到底怎么算」「买量 eCPM 和变现 eCPM 有什么区别」。"
+                       "边界：它返回的是「口径定义」，不是「数值」；算具体数值仍用 get_metric/get_top_history。"
+                       "这是语义层工具，是保证「算对」的基础——尤其要警惕同名不同义（如 eCPM 分买量/变现两套）。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "metric": {
+                    "type": "string",
+                    "enum": ["d7_roas", "cpi", "buy_ctr", "buy_cvr", "buy_ecpm", "monetization_ecpm", "d7_retention", "rewarded_views_per_user"],
+                    "description": "要查口径的指标 key。d7_roas=D7回报率，cpi=安装成本，buy_ctr/buy_cvr/buy_ecpm=买量侧CTR/CVR/eCPM，monetization_ecpm=变现eCPM，d7_retention=D7留存，rewarded_views_per_user=人均观次",
+                },
+            },
+            "required": ["metric"],
+        },
+    },
 ]
 
 
@@ -561,6 +581,19 @@ def _tool_search_knowledge(query: str, top_k: int = 3) -> Dict[str, Any]:
     }
 
 
+def _tool_get_metric_definition(metric: str) -> Dict[str, Any]:
+    """
+    查指标的标准口径定义（语义层工具）。
+
+    作用：让 LLM 在「判断口径」时先查标准答案，而不是对着裸表猜。
+    尤其警惕同名不同义（eCPM 分买量/变现两套、CTR 分买量/变现）。
+    """
+    result = semantic_layer.get_metric_definition(metric)
+    if "error" in result:
+        return result
+    return result
+
+
 # ---- 2.3 工具注册表：名字 → 函数（加工具只在这里加一行）----
 # 写工具（delete/adjust）复用 platform_layer 的 mock 平台实现。
 
@@ -572,6 +605,7 @@ def _build_tool_registry(plat):
         "get_top_history": _tool_get_top_history,
         "get_trend_with_ops": _tool_get_trend_with_ops,
         "search_knowledge": _tool_search_knowledge,
+        "get_metric_definition": _tool_get_metric_definition,
         "delete_sub_channel": lambda target, **kw: plat.delete_sub_channel(
             target, operator="agent", reason=kw.get("reason", "Agent 自动优化")),
         "adjust_target": lambda target, country, new_target, **kw: plat.adjust_target(
@@ -603,6 +637,9 @@ SYSTEM_PROMPT = """你是一个海外 IAA（网赚类）广告投放的资深优
 - 数据能直接判断 → 只用数据工具（get_metric / get_top_history / get_trend_with_ops），不要多余地查经验
 - 数据查清了、但仍不确定「这类问题业界通常怎么处理」→ 此时才用 search_knowledge 检索经验做参考
 - 经验是「补充参考」，不能替代数据判断，也不能作为写操作的唯一依据
+- 口径判断（重要）：当你需要「用某个指标做判断、但不确定它的精确算法」时，先调 get_metric_definition 拿标准定义。
+  尤其警惕「同名不同义」——eCPM 分买量（spend/buy_impressions×1000）和变现（ad_revenue/ad_impressions×1000）两套，
+  CTR/CVR 也分买量侧和变现侧。拿不准口径就先查，不要按字面猜。
 
 每一步输出格式（严格 JSON，不要输出其他文字）：
 - 想查数据时：
