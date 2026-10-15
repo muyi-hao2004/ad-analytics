@@ -1,331 +1,159 @@
-# 广告投放智能分析平台 (Ad Analytics Platform)
+# IAA 广告变现分析中台（IAA Monetization Analytics Platform）
 
-> 从0到1搭建的生产级广告投放数据分析系统，覆盖数据采集、清洗、指标计算、异常检测、数据库存储、可视化报表全流程。后续将扩展 RAG 知识库和数据分析 Agent。
+> 面向海外网赚类 IAA（广告变现）业务的分析中台，覆盖「数据建模 → 四层数仓 → 调度编排 → 数据分析 Agent → RAG 行业经验库」全链路。业务背景：美国 T0 市场，D7 ROAS 目标 70%。
 
-## 📋 项目简介
+一个能回答真实业务问题的系统：优化师用自然语言提问（"为什么这个渠道的 D7 ROAS 跌了？"），Agent 自动查数仓、调工具、查行业经验，给出带依据的结论，并对高危操作（如删子渠道）要求人工确认。
 
-本项目以**海外广告投放数据分析**为业务场景，模拟真实数据工程师的工作流程：从原始广告数据（CSV/Parquet/API）出发，经过清洗、计算、检测，最终输出可交互的 HTML 日报和异常告警。
+---
 
-项目采用**数仓四层架构（ODS → DWD → DWS → ADS）**组织数据加工流程，中间产物全部落盘为 Parquet 列式存储文件，可回溯、可复用、可对接 Spark。是学习 Python 数据工程 + 数仓建模的完整实战项目。
+## ✨ 核心亮点（面试可展开讲）
 
-## ✨ 功能特性
-
-### 已完成（第一阶段 V1）
-
-| 模块 | 功能 | 状态 |
-|---|---|---|
-| **数据加载** | 支持 CSV / Parquet / API 三种方式导入，统一入口 `load_data()`，数据校验、数据摘要 | ✅ |
-| **数仓分层** | ODS 贴源层 → DWD 明细层 → DWS 汇总层 → ADS 应用层，每层落盘 Parquet | ✅ |
-| **数据清洗** | 缺失值填充、重复值删除、类型转换、字段标准化、异常值处理、零曝光过滤 | ✅ |
-| **指标计算** | CTR/CVR/CPC/CPA/ROI 等核心广告指标，支持按渠道/日期/计划多维度汇总、环比、移动平均、排名 | ✅ |
-| **异常检测** | 5种异常检测：花费暴涨、点击率过低、转化率过低、CPA过高、零曝光，支持严重程度分级 | ✅ |
-| **数据库存储** | MySQL 数据库，支持建库建表、数据写入、SQL查询、批量导入 | ✅ |
-| **报表生成** | Jinja2 模板引擎生成 HTML 日报，包含核心指标卡片、渠道汇总表、每日趋势表、异常告警列表 | ✅ |
-| **工程化** | 配置管理（.env）、日志系统、虚拟环境、单元测试、代码格式化 | ✅ |
-
-### 规划中（第二、三阶段）
-
-- [x] 数据仓库（ODS/DWD/DWS/ADS 四层分层）
-- [x] Parquet 列式存储支持
-- [ ] ETL 自动化（Spark + Airflow）
-- [ ] API 服务（FastAPI + Redis 缓存）
-- [ ] RAG 知识库（广告平台规则、操作手册智能问答）
-- [ ] 数据分析 Agent（自然语言查数、自动生成报告）
-- [ ] 可视化界面（Streamlit）
-- [ ] Docker 容器化部署
-
-## 🛠 技术栈
-
-| 层级 | 技术 |
+| 亮点 | 说明 |
 |---|---|
-| **语言** | Python 3.14 |
-| **数据处理** | Pandas 3.0, NumPy 2.5 |
-| **数据库** | MySQL 8.0, SQLAlchemy, PyMySQL |
-| **报表模板** | Jinja2 3.1 |
-| **HTTP请求** | Requests |
-| **配置管理** | python-dotenv, PyYAML |
-| **测试** | pytest, pytest-cov |
-| **代码质量** | black, flake8 |
-| **项目管理** | pip, venv, pyproject.toml |
+| **双轴事实表 + SCD Type 2** | 变现数据同时按 `report_date` 和 `install_date` 双日期建模，解决"今天赚多少 vs 这批用户赚多少"；维度表用 SCD2 追踪渠道/计划历史变化 |
+| **四层数仓** | ODS → DWD → DWS → ADS，买量/变现拆表，素材、子渠道前后端表，全链路可回溯 |
+| **Agent 多轮 Function Calling** | 8 个工具（查指标/趋势/日志/横向对比/知识库检索/写操作），LLM 自主规划多步工具调用，非一次性问答 |
+| **人机协作安全闸** | 高危写操作（删子渠道等）先分析、后经人工确认才执行，`dry_run` 只分析不落地 |
+| **RAG 行业经验库** | ChromaDB 向量库 + bge-m3 中文嵌入，把优化师方法论做成可检索知识，弥补 LLM 不懂"自家玩法" |
+| **可解释性** | 决策附带"数据依据 + 操作日志 + 知识库参考"，不是黑盒输出 |
+| **Airflow Docker 编排** | Postgres 元数据库 + LocalExecutor 并行，每日定时 pipeline |
 
-## 📂 项目结构
+---
+
+## 🏗️ 系统架构
+
+```
+                    ┌─────────────────────────────────────────┐
+                    │            数据分析 Agent (agent.py)      │
+                    │  多轮 Function Calling · 8 工具 · 人工确认 │
+                    └──────┬──────────────┬──────────────┬─────┘
+                           │ 查数仓        │ 查经验        │ 写操作
+                           ▼              ▼              ▼
+              ┌──────────────┐   ┌──────────────┐   ┌──────────┐
+              │  四层数仓      │   │  RAG 知识库   │   │ 平台抽象层 │
+              │ ODS/DWD/DWS/ │   │ ChromaDB+    │   │ FastAPI   │
+              │ ADS (Parquet)│   │ bge-m3 嵌入   │   │ 后端 API  │
+              └──────▲───────┘   └──────────────┘   └────▲─────┘
+                     │ 数据加工                              │ 配置抓取
+              ┌──────┴───────┐                     ┌────────┴─────┐
+              │  Airflow 调度  │                     │  Playwright   │
+              │ (Docker+PG)  │                     │  抓取配置     │
+              └──────────────┘                     └──────────────┘
+```
+
+**数据链路**：Airflow 每日定时 → 抓取广告平台配置/数据 → 数仓四层加工 → Agent 按需查询分析 → 生成决策/报告。
+
+---
+
+## 📂 目录结构
 
 ```
 ad-analytics/
-├── src/
-│   └── ad_analytics/              # 主包
-│       ├── __init__.py            # 包标识（版本号、作者）
-│       ├── config.py              # 配置管理（Settings类，.env环境变量）
-│       ├── logger.py              # 日志配置（统一格式、控制台+文件输出）
-│       ├── data_loader.py         # 数据加载（CSV/API读取、校验、摘要）
-│       ├── cleaning.py            # 数据清洗（6步清洗流程、清洗报告）
-│       ├── metrics.py             # 指标计算（核心广告指标、多维度汇总、环比、排名）
-│       ├── anomaly_detection.py   # 异常检测（5种异常检测、严重程度分级）
-│       ├── database.py            # 数据库操作（MySQL连接、建表、写入、查询）
-│       └── report.py              # 报表生成（Jinja2模板、HTML日报）
-├── tests/                         # 单元测试
-│   ├── test_data_loader.py        # 数据加载模块测试（11个测试）
-│   └── test_cleaning.py           # 数据清洗模块测试（19个测试）
-├── scripts/                       # 验证脚本
-│   ├── generate_sample_data.py    # 生成模拟广告数据
-│   ├── verify_day2.py             # Day2验证
-│   ├── verify_day3.py             # Day3验证
-│   ├── verify_day6.py             # Day6验证（数据库全流程）
-│   ├── verify_day8.py             # Day8验证（异常检测）
-│   └── verify_day9.py             # Day9验证（报表生成全流程）
-├── data/                          # 数据目录（.gitignore忽略）
-│   ├── raw/                       # 原始数据（sample_ad_data.csv，1069条）
-│   └── processed/                 # 处理后数据（anomalies.csv等）
-├── reports/                       # 生成的报表（HTML日报）
-├── docs/                          # 项目文档
-│   └── notes/                     # 学习笔记（Day2-Day9）
-├── practice/                      # 练习目录
-├── main.py                        # 项目入口（一键运行全流程）
-├── pyproject.toml                 # 项目配置（现代Python项目）
-├── requirements.txt               # 依赖清单
-├── .env                           # 环境变量（密码等敏感信息，.gitignore忽略）
-├── .env.example                   # 环境变量示例
-├── .gitignore                     # Git忽略配置
-└── README.md                      # 项目说明（本文件）
+├── iaa_bi/                          # ★ IAA 中台（核心项目）
+│   ├── src/
+│   │   ├── config.py                # 全局配置（路径/字段/业务常量）
+│   │   ├── warehouse.py             # 四层数仓（ODS/DWD/DWS/ADS）
+│   │   ├── dim_scd.py               # SCD Type 2 慢变维
+│   │   ├── agent.py                 # 数据分析 Agent（8 工具 Function Calling）
+│   │   ├── knowledge_base.py        # RAG 知识库（ChromaDB + bge-m3）
+│   │   ├── app.py                   # FastAPI 后端
+│   │   ├── platform_layer.py        # 平台抽象层（BasePlatform/工厂）
+│   │   ├── build_report.py          # 报表生成
+│   │   └── fetchers/                # Playwright 配置抓取（策略模式）
+│   ├── dags/iaa_daily_pipeline.py   # Airflow DAG（每日 pipeline）
+│   ├── data/knowledge/              # 优化师经验文档（RAG 语料）
+│   ├── data_dictionary.md           # 数据字典（指标口径/字段定义）
+│   ├── docker-compose.yaml          # Airflow Docker 编排（Postgres）
+│   └── Dockerfile
+├── learning/                        # 学习过程归档（不属中台本体）
+│   ├── notes/                       # day02~day21 自学笔记
+│   ├── practice/ spark_basics/ fastapi_demo/ rag_demo/ 等练习
+└── src/ad_analytics/                # 早期单体版（中台的雏形）
 ```
 
-## 🔄 数据流向（完整流程）
-
-```
-原始数据 (CSV/API)
-    ↓
-[数据加载] data_loader.py
-    ├─ 读取CSV/API
-    ├─ 数据校验
-    └─ 数据摘要
-    ↓
-[数据清洗] cleaning.py
-    ├─ 字段标准化
-    ├─ 类型转换
-    ├─ 删除重复值
-    ├─ 处理缺失值
-    ├─ 处理异常值
-    └─ 零曝光过滤
-    ↓
-[指标计算] metrics.py
-    ├─ 基础指标（CTR/CVR/CPC/CPA）
-    ├─ 整体指标汇总
-    ├─ 按渠道/日期/计划分组
-    ├─ 环比计算
-    ├─ 移动平均
-    └─ 排名
-    ↓
-[异常检测] anomaly_detection.py
-    ├─ 花费暴涨检测
-    ├─ 点击率过低检测
-    ├─ 转化率过低检测
-    ├─ CPA过高检测
-    └─ 零曝光检测
-    ↓
-[数据库存储] database.py
-    ├─ 初始化数据库（建库建表）
-    └─ 写入清洗后的数据
-    ↓
-[报表生成] report.py
-    ├─ 准备核心指标
-    ├─ 准备渠道汇总
-    ├─ 准备每日趋势
-    ├─ 准备异常列表
-    ├─ Jinja2模板渲染
-    └─ 生成HTML日报
-    ↓
-输出：HTML报表 + 异常CSV + 数据库数据
-```
+---
 
 ## 🚀 快速开始
 
 ### 1. 环境要求
 
-- Python 3.10+（本项目使用 Python 3.14）
-- MySQL 8.0+（可选，不配置数据库也能运行，会跳过数据库步骤）
+- Python 3.10+（中台在 3.13/3.14 下验证）
+- Docker（跑 Airflow 需）
+- 依赖：`fastapi` / `pandas` / `chromadb` / `sentence-transformers` / `openai` / `playwright`
 
-### 2. 克隆项目
-
-```bash
-git clone <repo-url>
-cd ad-analytics
-```
-
-### 3. 创建虚拟环境并安装依赖
+### 2. 初始化数仓 + 知识库
 
 ```bash
-# 创建虚拟环境
-python -m venv venv
+cd iaa_bi/src
 
-# 激活虚拟环境
-# Windows (PowerShell)
-.\venv\Scripts\Activate.ps1
-# Windows (CMD)
-.\venv\Scripts\activate.bat
-# Mac/Linux
-source venv/bin/activate
+# 建四层数仓 + 维度表（含 SCD2）
+python init_campaign_dims.py
+python demo_warehouse.py
 
-# 安装依赖（开发模式，包本身也安装）
-pip install -e .
+# 建 RAG 知识库（bge-m3 中文嵌入，首次会下载约 2.27GB 模型）
+python init_knowledge.py
 ```
 
-### 4. 配置环境变量
+### 3. 跑数据分析 Agent
 
 ```bash
-# 复制环境变量模板
-cp .env.example .env
-
-# 编辑 .env 文件，填入你的配置
-# 主要配置：
-# DB_HOST=localhost
-# DB_PORT=3306
-# DB_USER=root
-# DB_PASSWORD=你的密码
-# DB_NAME=ad_analytics
+cd iaa_bi/src
+python demo_multi_round.py    # 多轮 Function Calling 演示
 ```
 
-### 5. 生成模拟数据（首次运行）
+配置 `.env`（参考 `iaa_bi/.env`）：`LLM_API_KEY`（deepseek）等。
+
+### 4. 启动 Airflow（Docker）
 
 ```bash
-python scripts/generate_sample_data.py
+cd iaa_bi
+docker compose up -d
+# Web UI: http://localhost:8080 (admin/admin)
+# 每日 08:00 自动跑 update_warehouse → run_agent
 ```
 
-会在 `data/raw/sample_ad_data.csv` 生成1069条模拟广告投放数据（30天、5个渠道、9个计划）。
-
-### 6. 运行项目（一键全流程）
+### 5. 启动后端 API
 
 ```bash
-python main.py
+cd iaa_bi/src
+python app.py    # FastAPI，含 /api/agent 等接口
 ```
 
-运行后会自动完成：数据加载 → 清洗 → 指标计算 → 异常检测 → 写入数据库 → 生成报表，全程有详细日志输出。
+---
 
-### 7. 查看报表
+## 🔑 关键设计决策（为什么这么做）
 
-运行完成后，在 `reports/` 目录下找到生成的 HTML 日报，双击用浏览器打开即可查看。
+| 问题 | 决策 | 理由 |
+|---|---|---|
+| 为什么用 LLM+工具+知识库，而不是训练模型？ | Agent + RAG | 优化场景「输出不唯一 + 数据量小」，训练模型欠拟合/过拟合；LLM 有预训练常识，工具补精确数据，RAG 补领域经验 |
+| 为什么 RAG 只装经验、不装精确数值？ | 数值走数仓，文本走 RAG | 精确数值必须写 SQL 查（RAG 检索会丢精度），经验是语义匹配 |
+| 为什么数仓用双轴事实表？ | report_date + install_date | 变现数据"今天赚多少"和"这批用户赚多少"是两套口径 |
+| 为什么 Agent 要人工确认开关？ | 写操作先确认 | 删子渠道等操作不可逆，人机协作防误删 |
 
-### 8. 运行单元测试
+---
 
-```bash
-# 运行所有测试
-pytest tests/ -v
+## 🧠 技术栈
 
-# 查看测试覆盖率
-pytest tests/ --cov=src/ad_analytics --cov-report=term-missing
-```
-
-## 📊 项目成果
-
-### 数据规模
-
-| 指标 | 数值 |
+| 层级 | 技术 |
 |---|---|
-| 原始数据 | 1069 条记录 |
-| 时间范围 | 30天（2026-08-01 ~ 2026-08-30） |
-| 渠道数量 | 5个（Facebook/Google/TikTok/Instagram/YouTube） |
-| 广告计划 | 9个 |
-| 清洗后数据 | 1041 条（删除28条零曝光，2.62%） |
+| 数据建模 | 星型模型、SCD Type 2、双轴事实表 |
+| 数仓 | Parquet 落盘、ODS/DWD/DWS/ADS 分层 |
+| 调度 | Apache Airflow（Docker + Postgres + LocalExecutor） |
+| Agent | OpenAI Function Calling（deepseek）、多轮对话、工具注册 |
+| RAG | ChromaDB、bge-m3 嵌入（sentence-transformers）、语义检索 |
+| 后端 | FastAPI、平台抽象层、Playwright |
 
-### 核心指标（示例）
+---
 
-| 指标 | 数值 |
-|---|---|
-| 总花费 | ¥XX,XXX |
-| 总曝光 | XXX,XXX |
-| 总点击 | XX,XXX |
-| 总转化 | X,XXX |
-| 整体CTR | X.XX% |
-| 整体CVR | X.XX% |
-| 整体CPC | ¥X.XX |
-| 整体CPA | ¥XX.XX |
+## 📄 参考文档
 
-### 异常检测结果
-
-| 异常类型 | 数量 |
-|---|---|
-| 点击率过低 | XX 条 |
-| CPA过高 | XX 条 |
-| 花费暴涨 | XX 条 |
-| 转化率过低 | XX 条 |
-| 零曝光 | 0 条（清洗时已删除） |
-
-### 测试覆盖
-
-- 数据加载模块：11个测试 ✅
-- 数据清洗模块：19个测试 ✅
-- 总测试数：30个 ✅
-
-## 📝 学习记录
-
-### 第一阶段：数据工程筑基（已完成）
-
-- [x] **Day1**：项目骨架 + 配置管理（Settings类、.env）+ 日志模块
-- [x] **Day2**：数据加载模块（CSV/API读取、pandas read_csv参数详解、数据校验）
-- [x] **Day3**：数据清洗模块（6步清洗流程、缺失值/重复值/类型转换、pandas取数详解）
-- [x] **Day4**：指标计算模块（CTR/CVR/CPA/ROI、groupby分组聚合、环比、移动平均）
-- [x] **Day5**：数据库基础 + SQL（MySQL安装、SQL基础、JOIN、窗口函数）
-- [x] **Day6**：Python连接MySQL + database.py（cursor/conn/commit/close、SQL建表DDL）
-- [x] **Day7**：pandas vs SQL选择 + Python面向对象（类/继承/封装/接口/装饰器）
-- [x] **Day8**：异常检测模块（5种异常检测、严重程度分级、从看懂到写出的练习方法）
-- [x] **Day9**：报表生成模块（HTML/CSS基础、Jinja2模板引擎、HTML日报生成）
-- [x] **Day10**：Pandas核心用法巩固 + 进阶练习 + 完整main.py流水线 + README完善
-
-### 第二阶段：数据仓库与ETL（规划中）
-
-- [ ] 数据仓库理论（OLTP/OLAP、星型模型、ODS/DWD/DWS/ADS分层）
-- [ ] ETL开发（增量加载、全量加载、幂等性、失败重跑）
-- [ ] Spark基础（DataFrame、分区、缓存、Shuffle）
-- [ ] Airflow调度（DAG、Task、定时调度、重试）
-- [ ] Docker容器化
-
-### 第三阶段：大模型应用（规划中）
-
-- [ ] FastAPI后端服务
-- [ ] RAG知识库（文档解析、Embedding、向量数据库、相似度搜索）
-- [ ] Agent开发（Function Calling、工具调用、多轮对话）
-- [ ] 系统优化与部署
-
-## 🧠 核心知识点
-
-### Python工程化
-- 模块与包、虚拟环境、依赖管理
-- 配置管理（环境变量、Settings类）
-- 日志系统（统一格式、分级输出）
-- 异常处理、单元测试、代码格式化
-
-### 数据处理（Pandas）
-- 数据读取（read_csv常用参数）
-- 数据清洗（缺失值、重复值、类型转换、异常值）
-- 数据取数（loc/iloc、条件筛选、多条件）
-- 分组聚合（groupby、agg命名聚合、多维度汇总）
-- 合并（merge、concat）
-- 时间序列（日期处理、shift环比、rolling移动平均）
-
-### 数据库
-- SQL基础（SELECT、WHERE、GROUP BY、HAVING、ORDER BY）
-- 多表连接（INNER/LEFT/RIGHT JOIN）
-- 窗口函数（ROW_NUMBER、RANK、SUM OVER、LAG/LEAD）
-- Python连接数据库（cursor、conn、commit、close）
-- SQLAlchemy引擎（连接池、统一接口）
-
-### 前端与报表
-- HTML基础（标签、表格、表单）
-- CSS基础（选择器、常用属性、盒模型）
-- Jinja2模板引擎（变量、循环、条件）
-- 模板渲染流程
+- `iaa_bi/data_dictionary.md` — 数据字典（15 字段口径、指标定义）
+- `learning/notes/` — 学习过程笔记（day02~day21）
 
 ## 👤 作者
 
-**Mia**
-- 深圳大学 应用数学（师范）本科
-- 目标：2027年港校数据科学硕士
-- 方向：AI大数据开发 / 大模型应用工程
-- 背景：3个月海外广告投放数据分析经验
+**Mia** — 深圳大学数学本科，目标 2027 年港校数据科学硕士。方向：AI 数据工程 / MLOps / 大模型应用。
 
 ## 📄 许可证
 
 MIT License
-
----
-
-> 本项目为学习实战项目，持续更新中。如有问题或建议，欢迎交流！
