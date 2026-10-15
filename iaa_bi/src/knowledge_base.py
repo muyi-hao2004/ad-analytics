@@ -108,18 +108,30 @@ def bge_m3_embedding_fn():
     bge-m3（BAAI）是当前最强的中文检索嵌入模型之一，多语言、支持稠密+稀疏+多向量，
     中文语义效果远好于 MiniLM。通过 sentence_transformers 加载。
 
-    注意：
-    - 首次运行会从 HuggingFace 下载约 2.27GB 权重（国内用 hf-mirror 镜像）
-    - 需要先 pip install sentence-transformers
+    加载策略（优先本地，避免每次走网络）：
+    1. 若本地已下载（iaa_bi/models/bge-m3/），直接用本地路径
+    2. 否则走 hf-mirror 镜像在线下载（约 2.27GB，国内直连 HF 不通）
+
+    下载方式（任选其一）：
+        HF_ENDPOINT=https://hf-mirror.com python -c \\
+          "from huggingface_hub import snapshot_download; \\
+           snapshot_download('BAAI/bge-m3', local_dir='iaa_bi/models/bge-m3')"
     """
     import os
-    # 国内直连 HF 不通时走镜像；已能直连则此设置无害
-    os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+    from pathlib import Path
+
+    # 本地模型目录（若有则直接用，最稳）
+    local_dir = Path(__file__).parent.parent / "models" / "bge-m3"
+    if (local_dir / "config.json").exists():
+        model_name = str(local_dir)
+    else:
+        # 国内直连 HF 不通时走镜像；已能直连则此设置无害
+        os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+        model_name = "BAAI/bge-m3"
 
     from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
     return SentenceTransformerEmbeddingFunction(
-        model_name="BAAI/bge-m3",
-        # 中文查询建议加前缀，bge 系列官方推荐的 query 指令
+        model_name=model_name,
         normalize_embeddings=True,
     )
 

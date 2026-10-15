@@ -82,6 +82,7 @@ iaa_bi/airflow_home/
 iaa_bi/data/dim.db
 iaa_bi/data/raw/
 iaa_bi/data/warehouse/
+iaa_bi/models/
 iaa_bi/**/__pycache__/
 
 # 个人隐私 / 临时文件（不提交）
