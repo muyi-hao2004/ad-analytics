@@ -37,6 +37,8 @@ def _load(path: Path) -> pd.DataFrame:
 
 def load_all():
     # 日常表用"细粒度"版本（粒度到素材/子渠道，支持全维度筛选下钻）
+    # 这张表含 D0~D7 全程指标，日常表（明细平铺）和 Cohort 矩阵（按天透视）
+    # 都读它，共用同一套筛选条件，天然联动。
     daily = _load(config.ADS_DIR / "daily_detail.parquet")
     creative = _load(config.ADS_DIR / "creative_table.parquet")
     sub_channel = _load(config.ADS_DIR / "sub_channel_table.parquet")
@@ -53,18 +55,32 @@ def load_logs() -> list:
 # ============================================================
 
 def prep_daily(daily: pd.DataFrame) -> pd.DataFrame:
-    """日常表：细粒度（含素材/子渠道/策略），整理成展示用。"""
+    """日常表：细粒度（含素材/子渠道/策略 + D0~D7 全程指标），整理成展示用。
+
+    这张表同时供两个视图消费：
+      - 日常表（明细平铺）：用维度 + 关键指标（D1/D7 留存、D7 ROI、CPI 等）
+      - Cohort 矩阵（按天透视）：用全程 ret_n/roi_n/ecpm_n/view_n + 原子列
+    所以这里要**保留全程指标列和原子列**，不能只留展示列。
+    """
     dims = ["install_date", "app", "country", "campaign", "strategy",
             "creative_id", "sub_channel"]
-    key_cols = ["installs", "spend", "cpi", "d1_retention", "d7_retention", "d7_roi"]
-    cols = [c for c in dims + key_cols if c in daily.columns]
+    # 日常表展示的关键列（原子量/固定量，不在全程指标列里）
+    key_cols = ["installs", "spend", "cpi"]
+    # 全程指标列（含 ret_n/roi_n/ecpm_n/view_n，覆盖 D0~D7，
+    # 其中 ret_1/ret_7/roi_7 即日常表展示用的 D1/D7 留存、D7 ROI）
+    # + 原子列（dact/drev/dview/dimp，供 Cohort 矩阵加权聚合重算）
+    metric_cols = [c for c in daily.columns
+                   if c.startswith(("ret_", "roi_", "ecpm_", "view_",
+                                    "dact", "drev", "dview", "dimp"))]
+    cols = [c for c in dims + key_cols + metric_cols if c in daily.columns]
     df = daily[cols].copy()
-    for c in ["d1_retention", "d7_retention", "d7_roi"]:
-        if c in df.columns:
-            df[c] = df[c] * 100
-    pct_cols = [c for c in ["d1_retention", "d7_retention", "d7_roi"] if c in df.columns]
-    money_cols = [c for c in ["spend", "cpi"] if c in df.columns]
+
+    # 比率列 * 100 便于展示（ret/roi 都是小数，转百分比）
+    pct_cols = [c for c in df.columns if c.startswith(("ret_", "roi_"))]
+    df[pct_cols] = df[pct_cols] * 100
     df[pct_cols] = df[pct_cols].round(1)
+    # 金额列 round 2（spend/cpi）
+    money_cols = [c for c in ["spend", "cpi"] if c in df.columns]
     df[money_cols] = df[money_cols].round(2)
     return df
 
@@ -219,6 +235,18 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
   .log-op-agent { color: #2c5f8a; font-weight: 600; }
   .log-op-human { color: #8e44ad; font-weight: 600; }
   .log-reason { color: #888; font-size: 12px; max-width: 300px; white-space: normal; }
+
+  /* 全程指标矩阵（日常表内的左上三角） */
+  .metric-label { font-size: 13px; color: #555; font-weight: 600; }
+  .metric-btn { padding: 5px 14px; border: 1px solid #ddd; border-radius: 6px; background: #fff;
+                cursor: pointer; font-size: 13px; margin-right: 6px; }
+  .metric-btn.active { background: #2c5f8a; color: #fff; border-color: #2c5f8a; }
+  .daily-legend { font-size: 12px; color: #888; margin-bottom: 10px; background: #fafbfc;
+                  padding: 8px 12px; border-radius: 6px; }
+  #daily-table th.col-day { background: #f0f4f8; }
+  #daily-table .today-cell { background: #fff7e6; }
+  #daily-table .empty-cell { background: #fafafa; color: #ccc; }
+  #daily-table .dim-col { background: #eef4fa; }
 </style>
 </head>
 <body>
@@ -237,6 +265,15 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 
 <div class="panel active" id="panel-daily">
   <div class="filters" id="daily-filters"></div>
+  <div class="toolbar">
+    <span class="metric-label">指标展示：</span>
+    <span id="daily-metric-switch"></span>
+  </div>
+  <div class="daily-legend">
+    <span class="star">*</span> 表示该数据是「今天」的实时值，仍在累计中、尚未统计完整；
+    空白格 = 该 cohort 在对应第 N 天还未发生（左上三角）。
+    默认按「日期」汇总；勾选国家/系列/素材/子渠道等维度后，会按该维度拆成多行。
+  </div>
   <div class="count" id="daily-count"></div>
   <div class="table-wrap"><table id="daily-table"></table></div>
 </div>
@@ -277,9 +314,11 @@ const FILTERS = {
 };
 
 // 各表的维度中文名 + 顺序
+// 注意：daily 的 install_date 是「默认分组维度」（永远按天汇总），
+// 不在筛选器里；其余维度（国家/系列/素材/子渠道等）是「勾选即展开」的筛选条件。
 const DIM_LABELS = {
   daily: [
-    ['install_date', '时间'], ['app', '包'], ['country', '国家'],
+    ['app', '包'], ['country', '国家'],
     ['campaign', '系列'], ['strategy', '策略'],
     ['creative_id', '素材'], ['sub_channel', '子渠道'],
   ],
@@ -287,9 +326,10 @@ const DIM_LABELS = {
   subchannel: [['sub_channel', '子渠道'], ['install_date', '安装日期']],
 };
 
-// 选中状态：空 Set = 全选
+// 选中状态：空 Set = 全选（即该维度不筛选，也不展开成列）
+// 特殊值 '__none__' = 显式清空（不选任何值）
 const selected = {
-  daily: { install_date: new Set(), app: new Set(), country: new Set(),
+  daily: { app: new Set(), country: new Set(),
            campaign: new Set(), strategy: new Set(), creative_id: new Set(),
            sub_channel: new Set() },
   creative: { creative_id: new Set(), install_date: new Set() },
@@ -339,13 +379,6 @@ function buildDropdowns() {
       container.appendChild(dd);
     });
   }
-  // 默认：日常表时间选「今天」
-  if (FILTERS.daily && FILTERS.daily.install_date) {
-    const dates = FILTERS.daily.install_date;
-    const today = dates.includes(TODAY) ? TODAY : dates[dates.length - 1];
-    selected.daily.install_date.add(today);
-  }
-  syncTag('daily', 'install_date');
 }
 
 function toggleDropdown(table, dim) {
@@ -371,7 +404,7 @@ function onOptionChange(table, dim, checkbox) {
 
 function selectAll(table, dim) {
   const s = selected[table][dim];
-  s.clear();  // 空 = 全选
+  s.clear();  // 空 = 全选（不筛选、也不展开）
   document.querySelectorAll('#' + table + '-menu-' + dim + ' input').forEach(cb => cb.checked = false);
   syncTag(table, dim);
   if (table === 'daily' && dim === 'campaign') syncCreativeOptions();
@@ -446,6 +479,165 @@ function isToday(dateStr) {
 // 渲染表格
 // ============================================================
 function renderTable(table) {
+  if (table === 'daily') {
+    renderDaily();
+    return;
+  }
+  renderGenericTable(table);
+}
+
+// 日常表专用渲染：按天汇总 + 动态维度分组 + 全程指标横铺（左上三角）
+function renderDaily() {
+  const tableEl = document.getElementById('daily-table');
+  const countEl = document.getElementById('daily-count');
+
+  // ---- 1. 筛选：应用 selected.daily（app/country/campaign/strategy/creative_id/sub_channel）----
+  const filtered = DATA.daily.filter(row => {
+    for (const dim of Object.keys(selected.daily)) {
+      if (!isSelected('daily', dim, row[dim])) return false;
+    }
+    return true;
+  });
+
+  // ---- 2. 确定「展开维度」：勾选了哪些维度（非全选、非 __none__ 哨兵）----
+  // 勾选了某维度 → 该维度作为列展开，行按该维度拆细
+  const expandDims = [];
+  for (const [dim, label] of DIM_LABELS.daily) {
+    const s = selected.daily[dim];
+    if (s.size > 0 && !s.has('__none__')) {
+      expandDims.push(dim);
+    }
+  }
+
+  // ---- 3. 探测全程指标的天数（D0~Dn）----
+  const row0 = filtered[0] || DATA.daily[0] || {};
+  const days = Object.keys(row0).filter(k => /^drev\d+$/.test(k))
+              .map(k => parseInt(k.replace('drev', ''), 10))
+              .sort((a, b) => a - b);
+
+  if (filtered.length === 0) {
+    tableEl.innerHTML = '<tr><td style="text-align:center;color:#999;padding:20px">暂无数据</td></tr>';
+    countEl.textContent = '共 0 行';
+    return;
+  }
+
+  // ---- 4. 按 [install_date, ...expandDims] 分组，聚合原子量 ----
+  const groups = {};   // key = install_date + 各展开维度值，val = 聚合对象
+  const keyOf = row => {
+    let k = row.install_date;
+    expandDims.forEach(d => { k += '||' + (row[d] === undefined ? '' : row[d]); });
+    return k;
+  };
+  filtered.forEach(row => {
+    const k = keyOf(row);
+    if (!groups[k]) {
+      groups[k] = {
+        install_date: row.install_date,
+        installs: 0, spend: 0,
+        dact: {}, drev: {}, dview: {}, dimp: {},
+      };
+      expandDims.forEach(d => { groups[k][d] = row[d]; });
+    }
+    const g = groups[k];
+    g.installs += (row.installs || 0);
+    g.spend += (row.spend || 0);
+    days.forEach(n => {
+      g.dact[n] = (g.dact[n] || 0) + (row['dact' + n] || 0);
+      g.drev[n] = (g.drev[n] || 0) + (row['drev' + n] || 0);
+      g.dview[n] = (g.dview[n] || 0) + (row['dview' + n] || 0);
+      g.dimp[n] = (g.dimp[n] || 0) + (row['dimp' + n] || 0);
+    });
+  });
+
+  // 排序：install_date 升序，展开维度按字典序
+  const groupList = Object.values(groups);
+  groupList.sort((a, b) => {
+    if (a.install_date !== b.install_date) return a.install_date < b.install_date ? -1 : 1;
+    for (const d of expandDims) {
+      const x = String(a[d] === undefined ? '' : a[d]);
+      const y = String(b[d] === undefined ? '' : b[d]);
+      if (x !== y) return x < y ? -1 : 1;
+    }
+    return 0;
+  });
+
+  // ---- 5. 算每个分组的派生指标 ----
+  const calcVal = (g, metric, n) => {
+    if (metric === 'roi') {
+      let cum = 0;
+      for (let i = 0; i <= n; i++) cum += (g.drev[i] || 0);
+      return g.spend ? cum / g.spend : null;
+    }
+    if (metric === 'ret') {
+      return g.installs ? (g.dact[n] || 0) / g.installs : null;
+    }
+    if (metric === 'ecpm') {
+      return g.dimp[n] ? (g.drev[n] || 0) / g.dimp[n] * 1000 : null;
+    }
+    if (metric === 'view') {
+      return g.dact[n] ? (g.dview[n] || 0) / g.dact[n] : null;
+    }
+    return null;
+  };
+
+  // ---- 6. 渲染表头 ----
+  let html = '<thead><tr>';
+  html += '<th class="dim-col">安装日</th>';
+  expandDims.forEach(d => {
+    const label = (DIM_LABELS.daily.find(x => x[0] === d) || [d, d])[1];
+    html += '<th class="dim-col">' + label + '</th>';
+  });
+  // 公共指标（不随 day 变）
+  html += '<th class="dim-col">安装</th>';
+  html += '<th class="dim-col">花费</th>';
+  html += '<th class="dim-col">CPI</th>';
+  // 全程指标：每个 day 横铺 D0..Dn（当前选中指标的 4 选 1）
+  days.forEach(n => {
+    html += '<th class="col-day">' + dailyMetricLabel() + ' D' + n + '</th>';
+  });
+  html += '</tr></thead><tbody>';
+
+  // ---- 7. 渲染数据行 ----
+  groupList.forEach(g => {
+    html += '<tr>';
+    html += '<td style="text-align:left">' + g.install_date + '</td>';
+    expandDims.forEach(d => {
+      html += '<td style="text-align:left">' + (g[d] === undefined ? '' : g[d]) + '</td>';
+    });
+    // 公共指标
+    html += '<td>' + (g.installs || 0) + '</td>';
+    html += '<td>' + (g.spend || 0).toFixed(2) + '</td>';
+    html += '<td>' + (g.installs ? (g.spend / g.installs).toFixed(2) : '—') + '</td>';
+    // 全程指标（左上三角）
+    days.forEach(n => {
+      const val = calcVal(g, dailyMetric, n);
+      // 今天对应哪一列：install_date + n 天 == today
+      const dateObj = new Date(g.install_date + 'T00:00:00');
+      dateObj.setDate(dateObj.getDate() + n);
+      const cellDate = dateObj.toISOString().slice(0, 10);
+      const isTodayCell = (cellDate === TODAY);
+      const notYetOccurred = (cellDate > TODAY);
+      const hasData = (val !== null && val !== undefined && !isNaN(val));
+
+      if (!hasData || notYetOccurred) {
+        html += '<td class="empty-cell"></td>';
+      } else {
+        const display = fmtDailyVal(val);
+        const star = isTodayCell ? ' <span class="star">*</span>' : '';
+        const cls = isTodayCell ? ' class="today-cell"' : '';
+        html += '<td' + cls + '>' + display + star + '</td>';
+      }
+    });
+    html += '</tr>';
+  });
+  html += '</tbody>';
+  tableEl.innerHTML = html;
+  countEl.textContent = '共 ' + groupList.length + ' 行 · 按天' +
+    (expandDims.length ? ' + ' + expandDims.length + ' 个维度分组' : '汇总');
+}
+
+// 通用表渲染（素材/子渠道/日志之外的明细表）
+function renderGenericTable(table) {
   let data = DATA[table];
   const dims = Object.keys(selected[table]);
 
@@ -603,13 +795,18 @@ function formatHeader(col) {
     install_date: '安装日', app: '包', country: '国家', campaign: '系列',
     strategy: '策略', creative_id: '素材ID', sub_channel: '子渠道', installs: '安装',
     spend_total: '花费', spend: '花费', cpi: 'CPI',
-    d1_retention: 'D1留存%', d7_retention: 'D7留存%',
     ctr: 'CTR%', cvr: 'CVR%',
+    d1_retention: 'D1留存%', d7_retention: 'D7留存%',
     d7_roi: 'D7 ROI%', d7_ecpm: 'D7 eCPM',
   };
   if (map[col]) return map[col];
-  const m = col.match(/^(ret|roi)_(\d+)$/);
-  if (m) return 'D' + m[2] + (m[1] === 'ret' ? '留存%' : ' ROI%');
+  // 全程指标列：ret_n / roi_n / ecpm_n / view_n → 中文名
+  const m = col.match(/^(ret|roi|ecpm|view)_(\d+)$/);
+  if (m) {
+    const labels = { ret: '留存%', roi: 'ROI%', ecpm: 'eCPM', view: '人均观次' };
+    return 'D' + m[2] + ' ' + labels[m[1]];
+  }
+  // 原子列（dact/drev/dview/dimp）默认隐藏，不展示
   return col;
 }
 
@@ -618,6 +815,16 @@ function formatCell(col, val, row) {
   if (col === 'install_date') {
     const star = isToday(val) ? ' <span class="star">*</span>' : '';
     return val + star;
+  }
+  // 全程 ROI 列：红涨绿跌（≥70 标红达标，否则绿）
+  const roiMatch = col.match(/^roi_(\d+)$/);
+  if (roiMatch) {
+    const cls = val >= 70 ? 'good' : 'bad';
+    return '<span class="' + cls + '">' + val + '%</span>';
+  }
+  // 留存列：加 % 后缀
+  if (/^ret_\d+$/.test(col)) {
+    return val + '%';
   }
   if (col === 'd7_roi') {
     const cls = val >= 70 ? 'good' : 'bad';
@@ -630,9 +837,49 @@ function formatCell(col, val, row) {
 }
 
 // ============================================================
+// 日常表全程指标（D0~Dn 左上三角）—— 指标切换
+// ============================================================
+let dailyMetric = 'roi';   // 当前展示的全程指标
+
+// 可切换的全程指标：key 用于 calcVal 分支，label 中文名，label 同时用于表头
+const DAILY_METRICS = [
+  { key: 'roi',  label: 'ROI %' },
+  { key: 'ret',  label: '留存 %' },
+  { key: 'ecpm', label: 'eCPM' },
+  { key: 'view', label: '人均观次' },
+];
+
+function dailyMetricLabel() {
+  const m = DAILY_METRICS.find(x => x.key === dailyMetric);
+  return m ? m.label : dailyMetric;
+}
+
+function buildDailyMetricSwitch() {
+  const container = document.getElementById('daily-metric-switch');
+  if (!container) return;
+  container.innerHTML = '';
+  DAILY_METRICS.forEach(m => {
+    const btn = document.createElement('button');
+    btn.className = 'metric-btn' + (m.key === dailyMetric ? ' active' : '');
+    btn.textContent = m.label;
+    btn.onclick = function() { dailyMetric = m.key; buildDailyMetricSwitch(); renderDaily(); };
+    container.appendChild(btn);
+  });
+}
+
+function fmtDailyVal(val) {
+  if (val === null || val === undefined || isNaN(val)) return '';
+  if (dailyMetric === 'roi' || dailyMetric === 'ret') return (val * 100).toFixed(1) + '%';
+  if (dailyMetric === 'ecpm') return val.toFixed(2);
+  if (dailyMetric === 'view') return val.toFixed(2);
+  return val;
+}
+
+// ============================================================
 // 初始化
 // ============================================================
 buildDropdowns();
+buildDailyMetricSwitch();
 renderTable('daily');
 renderTable('creative');
 renderTable('subchannel');
@@ -652,7 +899,7 @@ def main():
     creative = prep_creative(creative)
     sub_channel = prep_sub_channel(sub_channel)
 
-    today_str = "2026-10-08"
+    today_str = pd.Timestamp.now().strftime("%Y-%m-%d")
 
     html = build_html(daily, creative, sub_channel, logs, today_str)
 

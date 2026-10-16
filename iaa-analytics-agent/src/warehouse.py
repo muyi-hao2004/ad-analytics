@@ -312,10 +312,10 @@ def build_dws(dwd: pd.DataFrame) -> pd.DataFrame:
     for part in wide_parts[1:]:
         result = result.merge(part, on=DWS_INDEX_COLS, how="outer")
 
-    # 没值的补 0（某 cohort 某天没数据，表示该度量确实是 0）
-    for col in result.columns:
-        if col.startswith("d"):
-            result[col] = result[col].fillna(0)
+    # 没值的保留 NaN（表示"未来未发生"，不是 0）
+    # 关键：不能用 fillna(0)，否则会把"左上三角的空缺"填成 0，
+    # 后续算 ROI 累计、留存率时会把"未发生的天"误当成"收入为 0 的天"。
+    # NaN 会在 ADS 层算派生指标时自然传播为 NaN（= 未发生 / 不可得）。
 
     # 落地 DWS
     out = config.DWS_DIR / "cohort_daily_wide.parquet"
@@ -380,8 +380,13 @@ def build_ads(dws: pd.DataFrame, dwd: pd.DataFrame) -> pd.DataFrame:
 
     for n in days:
         # 累计收入 = drev0..drevn 之和
-        cum_rev = sum(df[f"drev{i}"] for i in range(n + 1))
+        # 关键：drev_n 是 NaN 表示"第 n 天还未发生"，则 roi_n 也应是 NaN（累计不可得）
+        # 用 cumsum 累加，NaN 会自然向后传播
+        cum_rev = sum(df[f"drev{i}"].fillna(0) for i in range(n + 1))
+        # 但若"当前天 n"是 NaN（未发生），roi_n 应为 NaN
+        current_nan = df[f"drev{n}"].isna()
         df[f"roi_{n}"] = cum_rev / df["spend_total"].replace(0, float("nan"))
+        df.loc[current_nan, f"roi_{n}"] = float("nan")
 
     # ---- CPI = spend_total / installs ----
     df["cpi"] = df["spend_total"] / df["installs"].replace(0, float("nan"))
@@ -539,20 +544,24 @@ def build_daily_detail(dwd: pd.DataFrame) -> pd.DataFrame:
     """
     生成「细粒度日常表」，粒度到 日期×包×国家×系列×素材×子渠道。
 
-    为什么需要这张表（与 DWS_INDEX_COLS 的日常表区分）：
-      - build_ads 产出的 daily_report 按"系列"聚合，素材/子渠道被拍平，
-        无法在报表里按素材/子渠道筛选、下钻。
-      - 这张细粒度表保留了 creative_id + sub_channel，配合策略(strategy)，
-        支持报表的全部筛选按钮 + 下钻。
+    与 build_ads（系列级 daily_report）的区别：
+      - daily_report 按"系列"聚合，素材/子渠道被拍平，只供系列级报表；
+      - 这张细粒度表保留 creative_id + sub_channel，支持报表全维度筛选下钻。
 
-    派生指标只算关键的（D0/D1/D7 留存率 + D7 ROI + CPI + 花费 + 安装），
-    避免表格过宽；更细的 D0~D7 全量在系列级 daily_report 里看。
+    **本表是唯一事实源**：日常表（明细平铺）和 Cohort 矩阵（按天透视成左上三角）
+    都读这张表，并用同一套筛选条件实时聚合——这样两者天然联动。
+
+    派生指标全程 D0~D7（与系列级 daily_report 同构，只是分组粒度更细）：
+      - Dn 留存率 = active_users(day=n) / installs
+      - Dn ROI    = 累计收入(d0..dn) / spend
+      - Dn eCPM   = 收入(day=n) / 展示(day=n) * 1000
+      - Dn 人均观次 = 观次(day=n) / active_users(day=n)
 
     Args:
         dwd: DWD 层干净的双轴事实表
 
     Returns:
-        细粒度日常表（install_date × 全维度 × 关键指标 + strategy）
+        细粒度日常表（install_date × 全维度 × D0~D7 全程指标 + strategy）
     """
     df = dwd.copy()
 
@@ -562,50 +571,89 @@ def build_daily_detail(dwd: pd.DataFrame) -> pd.DataFrame:
     df["day_offset"] = (df["report_date"] - df["install_date"]).dt.days
     df["install_date"] = df["install_date"].dt.strftime("%Y-%m-%d")
 
-    # ---- 步骤2：按细粒度维度聚合 ----
     group_cols = DETAIL_INDEX_COLS
 
-    # 安装数（install_date 当天，day_offset=0 的 installs 就是总安装）
-    installs = df[df["day_offset"] == 0].groupby(
-        group_cols, as_index=False)["installs"].sum()
+    # ---- 步骤2：按「细粒度维度 × day_offset」聚合原子度量 ----
+    # 同 build_ads 的聚合逻辑，只是 group_cols 更细（多 creative_id/sub_channel）
+    agg = df.groupby(group_cols + ["day_offset"], as_index=False).agg(
+        active_users=("active_users", "sum"),      # 留存分子
+        ad_revenue=("ad_revenue", "sum"),          # 收入
+        rewarded_views=("rewarded_views", "sum"),  # 观次
+        ad_impressions=("ad_impressions", "sum"),  # 展示
+        installs=("installs", "max"),              # 安装数（每天相同，取 max）
+        spend=("spend", "max"),                    # 花费（买量一次性投入，取 max）
+    )
 
-    # 花费（买量一次性投入，day0 有值；这里取该 cohort 的 spend 总和）
-    spend = df.groupby(group_cols, as_index=False)["spend"].sum()
+    # ---- 步骤3：pivot 成宽表（每个度量 × day_offset 横铺成 d0..dn）----
+    # 4 个原子度量分别 pivot，再 merge
+    pivot_specs = {
+        "active_users":     "dact",
+        "ad_revenue":       "drev",
+        "rewarded_views":   "dview",
+        "ad_impressions":   "dimp",
+    }
+    parts = []
+    for measure, tag in pivot_specs.items():
+        tmp = agg.copy()
+        tmp["d"] = "d" + tmp["day_offset"].astype(str)
+        wide = tmp.pivot_table(
+            index=group_cols, columns="d", values=measure, aggfunc="sum"
+        ).reset_index()
+        rename = {c: f"{tag}{c[1:]}" for c in wide.columns if c not in group_cols}
+        wide = wide.rename(columns=rename)
+        parts.append(wide)
 
-    # D1 活跃（第 1 天留存分子）
-    d1_active = df[df["day_offset"] == 1].groupby(
-        group_cols, as_index=False)["active_users"].sum()
-    d1_active = d1_active.rename(columns={"active_users": "d1_active"})
+    result = parts[0]
+    for part in parts[1:]:
+        result = result.merge(part, on=group_cols, how="outer")
 
-    # D7 活跃（第 7 天留存分子）
-    d7_active = df[df["day_offset"] == 7].groupby(
-        group_cols, as_index=False)["active_users"].sum()
-    d7_active = d7_active.rename(columns={"active_users": "d7_active"})
+    # ---- 步骤4：取 installs / spend（不随 day 变，从 agg 里按维度 max 取）----
+    fixed = df.groupby(group_cols, as_index=False).agg(
+        installs=("installs", "max"),
+        spend=("spend", "max"),
+    )
+    result = result.merge(fixed, on=group_cols, how="left")
 
-    # D0~D7 累计收入（用于 D7 ROI）
-    df7 = df[df["day_offset"] <= 7]
-    cum_rev = df7.groupby(group_cols, as_index=False)["ad_revenue"].sum()
-    cum_rev = cum_rev.rename(columns={"ad_revenue": "cum_revenue"})
+    # ---- 步骤5：算派生指标（D0~Dn 全程，命名 ret_n/roi_n/ecpm_n/view_n）----
+    # 找出所有 day 数（dact 前缀列的 0..n）
+    day_cols = [c for c in result.columns if c.startswith("dact")]
+    days = sorted(int(c.replace("dact", "")) for c in day_cols)
 
-    # ---- 步骤3：merge 成一张表 ----
-    result = installs
-    for part in [spend, d1_active, d7_active, cum_rev]:
-        result = result.merge(part, on=group_cols, how="left")
+    for n in days:
+        # Dn 留存率
+        result[f"ret_{n}"] = result[f"dact{n}"] / result["installs"].replace(0, float("nan"))
+        # Dn eCPM = 收入 / 展示 * 1000
+        result[f"ecpm_{n}"] = (
+            result[f"drev{n}"] / result[f"dimp{n}"].replace(0, float("nan")) * 1000)
+        # Dn 人均观次 = 观次 / 活跃
+        result[f"view_{n}"] = (
+            result[f"dview{n}"] / result[f"dact{n}"].replace(0, float("nan")))
+        # Dn ROI = 累计收入(d0..dn) / 花费
+        cum_rev = sum(result[f"drev{i}"].fillna(0) for i in range(n + 1))
+        result[f"roi_{n}"] = cum_rev / result["spend"].replace(0, float("nan"))
+        # 当前天未发生 → roi_n 也应是 NaN（左上三角空缺，不当作 0）
+        result.loc[result[f"drev{n}"].isna(), f"roi_{n}"] = float("nan")
 
-    # ---- 步骤4：算派生指标 ----
-    result["d1_retention"] = result["d1_active"] / result["installs"].replace(0, float("nan"))
-    result["d7_retention"] = result["d7_active"] / result["installs"].replace(0, float("nan"))
-    result["d7_roi"] = result["cum_revenue"] / result["spend"].replace(0, float("nan"))
-    result["cpi"] = result["spend"] / result["installs"].replace(0, float("nan"))
-
-    # ---- 步骤5：join 策略（从维度表 dim_campaign 取 strategy）----
+    # ---- 步骤6：join 策略（从维度表 dim_campaign 取 strategy）----
     result = _join_strategy(result)
+
+    # ---- 步骤7：只保留「明细平铺需要的列」+ 全程指标列 ----
+    # 日常表展示用：install_date+维度+关键指标（D1/D7 + CPI 等）
+    # Cohort 矩阵用：全程 ret_/roi_/ecpm_/view_ 列
+    keep = group_cols + ["installs", "spend"]
+    for n in days:
+        keep += [f"ret_{n}", f"roi_{n}", f"ecpm_{n}", f"view_{n}"]
+    keep += ["strategy"]
+    # dact/drev/dview/dimp 原子列也保留（供前端如需重算，也便于对账）
+    keep += [f"dact{n}" for n in days] + [f"drev{n}" for n in days] + \
+            [f"dview{n}" for n in days] + [f"dimp{n}" for n in days]
+    result = result[[c for c in keep if c in result.columns]]
 
     # 落地 ADS
     out = config.ADS_DIR / "daily_detail.parquet"
     _save_parquet(result, out)
     print(f"[ADS] 已生成细粒度日常表: {out.name}  ({len(result)} 行, "
-          f"粒度=日期×包×国家×系列×素材×子渠道 + strategy)")
+          f"粒度=日期×包×国家×系列×素材×子渠道 × D0~D{days[-1] if days else 0} 全程指标)")
     return result
 
 

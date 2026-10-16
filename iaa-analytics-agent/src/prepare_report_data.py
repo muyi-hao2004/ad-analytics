@@ -87,7 +87,12 @@ def make_fact_rows():
                             spend = round(base_installs * 0.03, 2)
 
                             # 该 cohort 的每天表现
-                            for day in range(DAYS):
+                            # 关键：左上三角 —— 越晚安装的 cohort，能观察到的天数越少。
+                            # install_offset = 该 cohort 距 START_DATE 的天数；
+                            # 它最多只能观察到 "今天"（START_DATE + DAYS-1）为止，
+                            # 即 day 只能到 (DAYS-1 - install_offset)，未来未发生的不造数据。
+                            max_day = DAYS - install_offset
+                            for day in range(max_day):
                                 report_date = install_date + pd.Timedelta(days=day)
                                 report_date_str = report_date.strftime("%Y-%m-%d")
 
