@@ -39,13 +39,13 @@ tracks:
 # ============================================================
 metrics:
 
-  d7_roas:
-    name: "D7 回报率（D7 ROAS）"
+  d7_roi:
+    name: "D7 回报率（D7 ROAS / D7 ROI）"
     track: monetization
     definition: "安装后 7 天窗口内，累计广告收入 / 累计广告花费"
     formula: "SUM(ad_revenue) / SUM(spend)  WHERE 日期 in [install_date, install_date+6]"
     fields: [ad_revenue, spend, install_date]
-    note: "退款已剔除，只算已归因收入；低于 0.70 需要优化"
+    note: "退款已剔除，只算已归因收入；低于 0.70 需要优化。指标 key 统一为 d7_roi（ROI 与 ROAS 在 IAA 语境下同指广告支出回报）"
     usage: "判断某批用户/某素材/某子渠道的变现效率，是删不删素材、调不调预算的核心依据"
 
   cpi:
@@ -95,6 +95,43 @@ metrics:
     formula: "active_users(install_date+6) / installs"
     fields: [active_users, installs]
     note: "衡量用户质量，D7 留存高说明用户粘性好"
+
+  # ---- 全程指标（D0~Dn，日常表左上三角横铺用）----
+  # 说明：以下四个指标都是「按天展开」的系列，day_offset = n（n=0,1,2,...）。
+  # 数仓层已把每个 n 的原子量落成列（dact_n/drev_n/dimp_n/dview_n），
+  # 报表按天实时聚合。这里只定义「第 n 天」的统一口径，不再为每个 n 单独建 key。
+
+  retention_dn:
+    name: "第 N 天留存率（D_N 留存）"
+    track: monetization
+    definition: "安装后第 n 天仍活跃的用户占该 cohort 总安装的比例"
+    formula: "active_users(install_date+n) / installs"
+    fields: [active_users, installs, install_date]
+    note: "全程口径，n=0,1,2,...。D0 留存 = 安装当天活跃/安装（≈次日留存前哨）。越晚安装的 cohort 能观察的 n 越少，天然形成左上三角"
+
+  roi_dn:
+    name: "第 N 天累计 ROI（D_N ROI）"
+    track: monetization
+    definition: "安装后累计到第 n 天的广告收入 / 累计广告花费"
+    formula: "SUM(ad_revenue for day in 0..n) / SUM(spend)"
+    fields: [ad_revenue, spend, install_date]
+    note: "累计口径，n=0,1,2,...。D7 ROI 即 roi_dn 在 n=7 的特例（与 d7_roi 同义）"
+
+  ecpm_dn:
+    name: "第 N 天 eCPM（D_N eCPM）"
+    track: monetization
+    definition: "第 n 天每千次广告展示带来的收入"
+    formula: "ad_revenue(day n) / ad_impressions(day n) * 1000"
+    fields: [ad_revenue, ad_impressions, install_date]
+    note: "单日口径（非累计），n=0,1,2,...。变现侧 eCPM，分母是 ad_impressions"
+
+  views_dn:
+    name: "第 N 天人均观次（D_N 观次）"
+    track: monetization
+    definition: "第 n 天活跃用户平均主动观看激励视频的次数"
+    formula: "rewarded_views(day n) / active_users(day n)"
+    fields: [rewarded_views, active_users, install_date]
+    note: "单日口径（非累计），n=0,1,2,..."
 
   rewarded_views_per_user:
     name: "人均观次"

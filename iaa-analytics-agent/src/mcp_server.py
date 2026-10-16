@@ -120,7 +120,7 @@ def get_metric_definition(metric: str) -> Dict[str, Any]:
     """查「指标的标准口径定义」——公式、依赖字段、口径备注。
 
     触发场景：用某指标判断但不确定它的精确算法时，先查标准定义（避免同名不同义）。
-    metric: d7_roas/cpi/buy_ctr/buy_cvr/buy_ecpm/monetization_ecpm/d7_retention/rewarded_views_per_user
+    metric: d7_roi/cpi/buy_ctr/buy_cvr/buy_ecpm/monetization_ecpm/d7_retention/rewarded_views_per_user/retention_dn/roi_dn/ecpm_dn/views_dn
     """
     return _get_metric_definition(metric)
 

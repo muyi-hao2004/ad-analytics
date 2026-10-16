@@ -42,7 +42,7 @@ def get_metric_definition(metric: str) -> Dict[str, Any]:
     查单个指标的完整口径定义。
 
     Args:
-        metric: 指标 key，如 d7_roas / cpi / buy_ctr / monetization_ecpm
+        metric: 指标 key，如 d7_roi / cpi / buy_ctr / monetization_ecpm / retention_dn
 
     Returns:
         {"metric": ..., "definition": {...}} 或 {"error": ...}
@@ -94,5 +94,5 @@ if __name__ == "__main__":
     print("\n=== 全部指标概览 ===")
     for m in list_metrics():
         print(f"  [{m['track']}] {m['metric']:22s} {m['name']}")
-    print("\n=== d7_roas 完整定义 ===")
-    print(get_metric_definition("d7_roas"))
+    print("\n=== d7_roi 完整定义 ===")
+    print(get_metric_definition("d7_roi"))

@@ -161,12 +161,19 @@ Agent 每天最多调一次配置。三者统一到"天"粒度，消除"小时�
 | **子渠道表** | 子渠道ID | 归因API(Adjust) + 前端 | **删除子渠道操作** |
 
 ### 日常表指标（全部 cohort 口径，D0 起可无限延伸）
+
+> 命名统一：指标 key 一律用 `d7_roi`（ROI 与 ROAS 在 IAA 语境下同指「广告支出回报」），
+> 语义层 `metrics.yaml` 里已统一为 `d7_roi`，全程指标用 `retention_dn`/`roi_dn`/`ecpm_dn`/`views_dn` 表示「第 N 天」。
+
 - 花费、安装、CPI
-- D0/D1/D2/... 留存率
-- D0/D1/D2/... eCPM（第 N 天留存人群的 eCPM）
-- D0/D1/D2/... 观次
-- D1/D2/... ROI（累计到第 N 天的同期收入/支出）
+- D0/D1/D2/... 留存率（`retention_dn`：第 N 天活跃 / 安装）
+- D0/D1/D2/... eCPM（`ecpm_dn`：第 N 天收入 / 展示 ×1000，单日口径）
+- D0/D1/D2/... 观次（`views_dn`：第 N 天观次 / 活跃，单日口径）
+- D1/D2/... ROI（`roi_dn`：累计到第 N 天的收入 / 花费；D7 ROI 即 `d7_roi`）
 - 后端点击率、转化率
+
+> 全程指标与 `metrics.yaml` 的 `retention_dn`/`roi_dn`/`ecpm_dn`/`views_dn` 一一对应，
+> 前端报表按天用原子列（dact/drev/dimp/dview）实时聚合，不做简单平均。
 
 ### 素材/子渠道前后端表结构（已实现）
 

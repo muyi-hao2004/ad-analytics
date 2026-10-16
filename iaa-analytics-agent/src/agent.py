@@ -356,8 +356,8 @@ TOOLS_DEFINITION = [
             "properties": {
                 "metric": {
                     "type": "string",
-                    "enum": ["d7_roas", "cpi", "buy_ctr", "buy_cvr", "buy_ecpm", "monetization_ecpm", "d7_retention", "rewarded_views_per_user"],
-                    "description": "要查口径的指标 key。d7_roas=D7回报率，cpi=安装成本，buy_ctr/buy_cvr/buy_ecpm=买量侧CTR/CVR/eCPM，monetization_ecpm=变现eCPM，d7_retention=D7留存，rewarded_views_per_user=人均观次",
+                    "enum": ["d7_roi", "cpi", "buy_ctr", "buy_cvr", "buy_ecpm", "monetization_ecpm", "d7_retention", "rewarded_views_per_user", "retention_dn", "roi_dn", "ecpm_dn", "views_dn"],
+                    "description": "要查口径的指标 key。d7_roi=D7回报率，cpi=安装成本，buy_ctr/buy_cvr/buy_ecpm=买量侧CTR/CVR/eCPM，monetization_ecpm=变现eCPM，d7_retention=D7留存，rewarded_views_per_user=人均观次，retention_dn/roi_dn/ecpm_dn/views_dn=全程指标(第N天)",
                 },
             },
             "required": ["metric"],
