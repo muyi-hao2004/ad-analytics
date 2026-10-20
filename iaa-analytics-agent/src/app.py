@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import config
 import dim_scd
+import guardrails
 import platform_layer
 import agent
 
@@ -103,12 +104,34 @@ def health():
     return {"ok": True, "service": "IAA BI 中台", "time": dim_scd.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
 
+def _guard(action: dict):
+    """Web 接口的护栏校验。
+
+    为什么这个文件也需要：这三个接口是**人**在看板上点按钮触发的，
+    但它和 Agent 路径打的是同一个平台。之前这里直接调 plat.xxx()，
+    完全绕过了 guardrails —— 同一条规则（比如删除要求样本量 >= 100）
+    在 Agent 路径生效、在人手动路径不生效，等于没有规则。
+
+    护栏的层级不看它写得多好，看**还有没有别的路能打到平台**。
+    """
+    ok, why = guardrails.validate_action(
+        action, agent._current_context_for(action))
+    return ok, why
+
+
 @app.post("/api/delete_sub_channel")
 def api_delete_sub_channel(req: DeleteSubChannelReq):
-    """删除（批量）子渠道：转发给平台层，返回每条的结果。"""
+    """删除（批量）子渠道：先过护栏，再转发给平台层。"""
     plat = platform_layer.get_platform("mock")
     results = []
     for sid in req.sub_channel_ids:
+        action = {"action": "delete_sub_channel", "target": sid,
+                  "reason": req.reason or f"{req.operator} 手动操作"}
+        ok, why = _guard(action)
+        if not ok:
+            results.append({"sub_channel_id": sid, "ok": False,
+                            "message": f"护栏拦截：{why}"})
+            continue
         r = plat.delete_sub_channel(
             sid, operator=req.operator, app=req.app,
             channel=req.channel, reason=req.reason
@@ -126,6 +149,13 @@ def api_delete_sub_channel(req: DeleteSubChannelReq):
 
 @app.post("/api/adjust_budget")
 def api_adjust_budget(req: AdjustBudgetReq):
+    action = {"action": "adjust_budget", "target": req.campaign_id,
+              "params": {"country": req.country, "new_budget": req.new_budget},
+              "reason": req.reason or f"{req.operator} 手动调整"}
+    ok, why = _guard(action)
+    if not ok:
+        raise HTTPException(status_code=400, detail=f"护栏拦截：{why}")
+
     plat = platform_layer.get_platform("mock")
     r = plat.adjust_budget(req.campaign_id, req.country, req.new_budget,
                            req.operator, req.reason)
@@ -136,6 +166,13 @@ def api_adjust_budget(req: AdjustBudgetReq):
 
 @app.post("/api/adjust_target")
 def api_adjust_target(req: AdjustTargetReq):
+    action = {"action": "adjust_target", "target": req.campaign_id,
+              "params": {"country": req.country, "new_target": req.new_target},
+              "reason": req.reason or f"{req.operator} 手动调整"}
+    ok, why = _guard(action)
+    if not ok:
+        raise HTTPException(status_code=400, detail=f"护栏拦截：{why}")
+
     plat = platform_layer.get_platform("mock")
     r = plat.adjust_target(req.campaign_id, req.country, req.new_target,
                            req.operator, req.reason)

@@ -221,3 +221,72 @@ class TestCheckBatch:
     def test_空列表不报错(self):
         accepted, rejected = g.check_batch([])
         assert accepted == [] and rejected == []
+
+
+# ============================================================
+# 入口一致性：护栏不能有「绕过去的路」
+# ============================================================
+#
+# 这组测试源于一次审计。当时用 grep 找所有调用平台写方法的地方，发现三处：
+#   agent._execute_action     → 过了护栏 ✓
+#   mcp_server.submit_suggestion → 过了护栏，但组装 current 漏了 installs（误拒）
+#   app.py 三个 Web 接口      → 完全没过护栏 ✗
+#
+# 结论：护栏的层级不看它写得多好，看**还有没有别的路能打到平台**。
+# 只加一层而留着旁路，等于没加。
+
+class TestWeb接口也过护栏:
+    """app.py 的写接口是人手动触发的，但打的是同一个平台，规则必须一致。"""
+
+    @pytest.fixture(autouse=True)
+    def _app(self):
+        pytest.importorskip("fastapi", reason="Web 接口测试需要 fastapi")
+        import app as appmod
+        self._guard = appmod._guard
+
+    def test_删除描述性target被拦(self):
+        ok, why = self._guard({
+            "action": "delete_sub_channel",
+            "target": "我认为应该删除这个子渠道", "reason": "手动"})
+        assert not ok
+        assert "形态异常" in why
+
+    def test_删除查不到样本量被拦(self):
+        ok, why = self._guard({
+            "action": "delete_sub_channel", "target": "ch_999999", "reason": "手动"})
+        assert not ok
+        assert "安装量" in why
+
+    def test_预算超区间被拦(self):
+        ok, _ = self._guard({
+            "action": "adjust_budget", "target": "US_A_01",
+            "params": {"country": "US", "new_budget": 999999}, "reason": "手动"})
+        assert not ok
+
+    def test_目标把070写成70被拦(self):
+        # LLM 和人都容易犯：0.70 写成 70。差 100 倍且不会报错。
+        ok, _ = self._guard({
+            "action": "adjust_target", "target": "US_A_01",
+            "params": {"country": "US", "new_target": 70}, "reason": "手动"})
+        assert not ok
+
+
+class Test组装逻辑收口:
+    """组装「当前状态」只能有一个实现，否则两个调用方迟早漂移。"""
+
+    def test_删除动作要带installs(self):
+        import agent
+        cur = agent._current_context_for(
+            {"action": "delete_sub_channel", "target": "ch_001"})
+        assert "installs" in cur, "delete 必须带 installs，否则护栏只能 fail-closed 误拒"
+
+    def test_预算动作要带预算基线(self):
+        import agent
+        cur = agent._current_context_for({
+            "action": "adjust_budget", "target": "US_A_01",
+            "params": {"country": "US"}})
+        assert "budget" in cur
+
+    def test_未知动作返回空(self):
+        import agent
+        assert agent._current_context_for({"action": "nope", "target": "x"}) == {}
