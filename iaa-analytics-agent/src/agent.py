@@ -31,6 +31,7 @@ import config
 import dim_scd
 import guardrails
 import knowledge_base
+import llm_cost
 import semantic_layer
 from dotenv import load_dotenv
 
@@ -747,7 +748,7 @@ def _make_client():
 
 
 def _call_once(client, model, messages, tools=None):
-    """单次调用 LLM，返回 message 对象。
+    """单次调用 LLM，返回 (message 对象, token 用量)。
 
     和旧版的区别：旧版只取 message.content（字符串），靠 prompt 教模型「输出什么 JSON」；
     现在把 tools 直接传给模型，模型返回结构化的 tool_calls，我们不需要再解析自由文本。
@@ -757,6 +758,12 @@ def _call_once(client, model, messages, tools=None):
          （而且 system prompt 短而稳定，更容易命中 provider 的 prompt cache）
       2. 参数由 schema 约束，模型不会漏字段、不会把数字写成字符串
       3. 可以一次返回多个 tool_calls，读操作天然可并行
+
+    为什么多返回 usage：
+        响应对象上本来就有 resp.usage，但旧代码 `return resp.choices[0].message`
+        把它直接扔了——于是整个项目跑了几十次也没留下任何成本数据。
+        拿到 usage 之后，一次运行花多少钱才是可回答的问题，
+        而不是「大概几毛钱吧」。
     """
     kwargs = {
         "model": model,
@@ -768,7 +775,7 @@ def _call_once(client, model, messages, tools=None):
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
     resp = client.chat.completions.create(**kwargs)
-    return resp.choices[0].message
+    return resp.choices[0].message, llm_cost.extract_usage(resp)
 
 
 def run_llm_loop(snapshot: Dict[str, Any], plat=None,
@@ -795,7 +802,15 @@ def run_llm_loop(snapshot: Dict[str, Any], plat=None,
         max_rounds: 最多几轮，防死循环
 
     Returns:
-        {"conclusion": ..., "reasoning": ..., "actions": [...], "trace": [...]}
+        {
+          "conclusion": ..., "reasoning": ..., "actions": [...], "trace": [...],
+          "usage": {model, calls, prompt_tokens, completion_tokens,
+                    cache_hit_rate, input_per_call, cost_usd, cost_cny}
+        }
+
+        其中 usage 是**一次完整分析**的累计成本。注意它不能按
+        「单次调用单价 × 轮数」估算：每轮都要重发完整历史，
+        累计输入 token 随轮数呈三角数增长（见 llm_cost 模块注释）。
     """
     client, model = _make_client()
     registry = _build_tool_registry()
@@ -809,9 +824,11 @@ def run_llm_loop(snapshot: Dict[str, Any], plat=None,
 
     trace: List[Dict[str, Any]] = []
     decision: Optional[Dict[str, Any]] = None
+    usage = dict(llm_cost.EMPTY)     # 累计 token 用量，最后折算成一次任务成本
 
     for round_no in range(1, max_rounds + 1):
-        msg = _call_once(client, model, messages, tools=tools)
+        msg, one_usage = _call_once(client, model, messages, tools=tools)
+        usage = llm_cost.merge(usage, one_usage)
         tool_calls = getattr(msg, "tool_calls", None) or []
 
         # ---------- 情况 A：模型给出了工具调用 ----------
@@ -879,7 +896,8 @@ def run_llm_loop(snapshot: Dict[str, Any], plat=None,
                 })
 
             if decision is not None:
-                return {**decision, "trace": trace}
+                return {**decision, "trace": trace,
+                        "usage": llm_cost.finalize(usage, model)}
             continue
 
         # ---------- 情况 B：模型没调工具，直接回了文本 ----------
@@ -894,6 +912,7 @@ def run_llm_loop(snapshot: Dict[str, Any], plat=None,
                 "reasoning": fallback.get("reasoning", ""),
                 "actions": fallback.get("actions") or [],
                 "trace": trace,
+                "usage": llm_cost.finalize(usage, model),
             }
 
         trace.append({"round": round_no, "step": "no_tool_call",
@@ -903,7 +922,9 @@ def run_llm_loop(snapshot: Dict[str, Any], plat=None,
             "请调用 submit_decision 提交最终决策（没有要做的动作就传空 actions）。"})
 
     return {"conclusion": "达到最大轮数仍未提交决策", "reasoning": "",
-            "actions": [], "trace": trace}
+            "actions": [], "trace": trace,
+            "usage": llm_cost.finalize(usage, model),
+            "exhausted": True}
 
 
 def parse_llm_step(llm_text: str) -> Dict[str, Any]:
@@ -1002,7 +1023,11 @@ def run_agent(dry_run: bool = True, max_rounds: int = 8) -> Dict[str, Any]:
                 print(f"    └ 推理链: {reasoning[:200]}")
         else:
             print(f"  第{t['round']}轮 [格式异常] {t.get('raw', '')[:100]}")
-    print("--- trace 结束 ---\n")
+    print("--- trace 结束 ---")
+    # 成本在这里就打印，而不是等整个流程结束：
+    # 如果后面执行动作出错崩了，至少还能看到这次分析已经花了多少
+    print("本次分析成本:", llm_cost.format_line(decision.get("usage", {})))
+    print()
 
     print("结论:", decision["conclusion"])
     print("动作数:", len(decision["actions"]))
@@ -1039,6 +1064,7 @@ def run_agent(dry_run: bool = True, max_rounds: int = 8) -> Dict[str, Any]:
         "batch_rejected": batch_rejected,
         "trace": decision.get("trace", []),
         "executed": executed,
+        "usage": decision.get("usage", {}),
     }
 
 
@@ -1112,8 +1138,11 @@ def run_agent_with_approval() -> Dict[str, Any]:
     返回给投放人。投放人看过 reasoning 和动作后，再决定 approve/reject。
 
     Returns:
-        {"run_id": ..., "conclusion": ..., "reasoning": ..., "actions": [...], "trace": [...]}
+        {"run_id": ..., "conclusion": ..., "reasoning": ..., "actions": [...],
+         "trace": [...], "usage": {...}}
         run_id 是这次建议的 ID，投放人凭它调用 approve/reject。
+        usage 是这次分析的 token 消耗与折算成本，已同时落库（agent_run_history.usage_json），
+        可以直接回答「跑一轮多少钱」。
     """
     import platform_layer
     plat = platform_layer.get_platform("mock")
@@ -1134,6 +1163,7 @@ def run_agent_with_approval() -> Dict[str, Any]:
         actions=write_actions,
         executed=[],
         trace=decision.get("trace", []),
+        usage=decision.get("usage"),
     )
 
     return {
@@ -1142,6 +1172,7 @@ def run_agent_with_approval() -> Dict[str, Any]:
         "reasoning": decision.get("reasoning", ""),
         "actions": write_actions,
         "trace": decision.get("trace", []),
+        "usage": decision.get("usage", {}),
     }
 
 

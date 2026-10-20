@@ -84,8 +84,20 @@ iaa-analytics-agent/
 ### 1. 安装依赖
 
 ```bash
+python -m venv venv          # 建议隔离环境（Linux/macOS: venv/bin/python，Windows: venv/Scripts/python.exe）
 pip install -r requirements.txt
 ```
+
+> **下文命令统一写 `python`**，请按你实际的解释器替换。
+> 如果是带虚拟环境，Windows 用 `venv\Scripts\python.exe`，Linux/macOS 用 `venv/bin/python`。
+>
+> 依赖装完自检一次（Agent 跑不起来最常见的原因是 `openai` 没装或版本过旧）：
+> ```bash
+> python -c "import openai, yaml, pandas, chromadb; print('deps ok', openai.__version__)"
+> ```
+>
+> 要跑测试再装开发依赖：`pip install -r requirements-dev.txt`
+> （`requirements.txt` 是运行时依赖，`requirements-dev.txt` 额外带 pytest）
 
 > bge-m3 嵌入模型需先下载到 `models/bge-m3/`（国内可走 hf-mirror 镜像）：
 > ```python
@@ -95,13 +107,20 @@ pip install -r requirements.txt
 
 ### 2. 配置环境变量
 
-复制 `.env` 填入 LLM 凭据：
+```bash
+cp .env.example .env    # 然后填入真实 LLM 凭据
+```
+
+必填三项：
 
 ```bash
 LLM_API_KEY=your_key
 LLM_BASE_URL=https://api.deepseek.com
 LLM_MODEL=deepseek-chat
 ```
+
+计价三项可选（不填用默认值，只影响成本报表的绝对金额，不影响功能）：
+`LLM_INPUT_PRICE_PER_MTOK` / `LLM_OUTPUT_PRICE_PER_MTOK` / `LLM_USD_CNY`。
 
 ### 3. 跑数仓 + 生成报表
 
@@ -123,6 +142,12 @@ python -m uvicorn src.app:app --reload --port 8000
 
 ```bash
 docker compose up -d   # 启动 Postgres + Airflow，Web UI: http://localhost:8080 (admin/admin)
+```
+
+### 6. 看成本
+
+```bash
+python src/cost_report.py    # 每次运行的 token 与折算成本
 ```
 
 ---
@@ -198,6 +223,60 @@ MCP Server 侧同样如此：对外只暴露 `submit_suggestion`（提交建议�
 
 ---
 
+## 成本可观测（`src/llm_cost.py` + `src/cost_report.py`）
+
+Agent 每跑一次分析，token 用量和折算成本一并落库（`agent_run_history.usage_json`），
+可以用一条命令出报表：
+
+```bash
+python src/cost_report.py
+```
+
+```
+样本            5 次运行 / 22 次 LLM 调用
+平均轮数        4.4 轮/次
+单次成本        平均 $0.0036（¥0.0255）  最贵 $0.0089  最省 $0.0010
+token 结构      输入 157,500 / 输出 2,970  → 输入占 98.2%
+缓存命中率      35.0%
+平均每轮输入    7,159 token
+```
+
+### 为什么不能按「单价 × 调用次数」估成本
+
+多轮 Function Calling 的**每轮都要重发完整历史**：
+
+```
+第 1 轮   system + 快照               ≈ 8k
+第 2 轮   + 工具调用 + 工具结果        ≈ 9.5k
+第 3 轮   + 再叠加                    ≈ 11k
+```
+
+所以累计输入随轮数呈**三角数**增长，不是线性。轮数越多，偏差越大。
+这也是「token 单价降了但账单涨了」的机制——不是单价涨，是调用结构和上下文变复杂。
+
+### 三个可直接看的指标
+
+| 指标 | 含义 | 涨了说明什么 |
+|---|---|---|
+| `input_per_call` | 平均每轮输入 token | 上下文在膨胀，通常是工具返回了太多字段 |
+| `cache_hit_rate` | prompt cache 命中率 | 低于 20% 说明 system prompt 还在变，无法复用前缀 |
+| `avg_rounds` | 平均轮数 | Agent 在反复查同类数据，考虑合并成批量工具 |
+
+### 价格配置
+
+价格走环境变量，不硬编码（会变、各渠道不同）：
+
+```bash
+LLM_INPUT_PRICE_PER_MTOK=0.15   # USD / 百万 token
+LLM_OUTPUT_PRICE_PER_MTOK=0.60
+LLM_USD_CNY=7.1
+```
+
+拿不到 `usage` 时（部分网关/本地推理不返回）按 0 记，**不抛异常**——
+成本统计失败不应该让业务分析挂掉。
+
+---
+
 ## 指标口径（语义层）
 
 12 个核心指标定义在 `src/metrics.yaml`，命名统一：
@@ -214,4 +293,4 @@ MCP Server 侧同样如此：对外只暴露 `submit_suggestion`（提交建议�
 
 - `data_dictionary.md` — 数据字典（字段、数仓模型、口径）
 - `src/metrics.yaml` — 语义层指标口径
-- `learning/notes/` — 学习笔记（day01 ~ day22）
+- `tests/` — 单测：护栏边界 / 读写分离 / 成本计量。跑法 `pytest tests/ -q`

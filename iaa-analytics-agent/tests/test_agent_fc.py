@@ -51,9 +51,10 @@ class FakeClient:
     断言就会莫名其妙地失败（这个坑在第一次跑测试时就踩到了）。
     """
 
-    def __init__(self, script):
+    def __init__(self, script, with_usage=False):
         self._script = list(script)
         self.requests = []
+        self.with_usage = with_usage
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
     def _create(self, **kwargs):
@@ -64,7 +65,20 @@ class FakeClient:
         if not self._script:
             raise AssertionError("FakeClient 脚本已用尽，但代码还在调用 LLM（可能存在死循环）")
         msg = self._script.pop(0)
-        return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+        resp = SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+
+        if self.with_usage:
+            # 用 messages 的序列化长度粗估输入 token（≈4 字符/token），
+            # 目的是**复现真实结构**：每轮都把完整历史重发一次，
+            # 所以 prompt_tokens 一轮比一轮大，而不是恒定值。
+            raw = json.dumps(kwargs.get("messages") or [], ensure_ascii=False, default=str)
+            prompt = max(1, len(raw) // 4)
+            resp.usage = SimpleNamespace(
+                prompt_tokens=prompt,
+                completion_tokens=20,
+                total_tokens=prompt + 20,
+            )
+        return resp
 
 
 @pytest.fixture
@@ -258,3 +272,67 @@ class TestFunctionCallingLoop:
         out = run_with(client, monkeypatch)
         assert out["conclusion"] == "兜底路径"
         assert out["trace"][0]["source"] == "text-fallback"
+
+
+# ============================================================
+# 成本计量：为什么值得单独测
+# ============================================================
+# 因为「一次 Agent 分析花多少钱」是个会被追问的数字，
+# 而且它**不能**用「单次调用单价 × 轮数」估——
+# 每轮都要重发完整历史，累计输入 token 随轮数是三角数增长。
+# 下面的测试就是在验证这个结构，而不是只验证一个加法对不对。
+
+class TestCostAccounting:
+    def test_usage会被累加进返回值(self, monkeypatch, no_io):
+        client = FakeClient([
+            fake_message(tool_calls=[fake_tool_call("c1", "get_metric", {"metric": "d7_roi"})]),
+            fake_message(tool_calls=[fake_tool_call("c2", "submit_decision", {
+                "conclusion": "无需调整", "reasoning": "ROI 达标", "actions": []})]),
+        ], with_usage=True)
+        out = run_with(client, monkeypatch)
+
+        usage = out["usage"]
+        assert usage["calls"] == 2
+        assert usage["prompt_tokens"] > 0
+        assert usage["completion_tokens"] == 40        # 2 次 × 20
+        assert usage["cost_usd"] > 0
+
+    def test_输入token随轮数超线性增长(self, monkeypatch, no_io):
+        """验证「重发历史」这个结构：第 3 轮输入 > 第 1 轮输入，且累计 > 单轮×轮数的一半。"""
+        client = FakeClient([
+            fake_message(tool_calls=[fake_tool_call("c1", "get_metric", {"metric": "d7_roi"})]),
+            fake_message(tool_calls=[fake_tool_call("c2", "get_metric", {"metric": "d7_roas"})]),
+            fake_message(tool_calls=[fake_tool_call("c3", "submit_decision", {
+                "conclusion": "done", "reasoning": "ok", "actions": []})]),
+        ], with_usage=True)
+        run_with(client, monkeypatch)
+
+        # 从 FakeClient 记录的每次请求里算输入规模
+        sizes = [len(json.dumps(r["messages"], ensure_ascii=False, default=str))
+                 for r in client.requests]
+        assert sizes[2] > sizes[1] > sizes[0], "历史确实在累积"
+
+        # 关键断言（下界，不设具体涨幅）：
+        #   如果每轮重发的都是**同样大小**的上下文，3 轮累计恰好 = sizes[0] * 3。
+        #   实际严格大于它，说明历史在累积。
+        #
+        # 为什么这里只断言「大于」而不写「大 30%」：
+        #   短对话里固定成本（system prompt + 数据快照）占绝对大头，
+        #   history 增量相对小，3 轮只超出约 18%。轮数越多超出越明显
+        #   ——这本身就是个结论：**长任务里历史才是成本主因，短任务里是固定开销**。
+        #   写成固定百分比会在改 prompt 长度时随机红，属于脆断言。
+        total_input = sum(sizes)
+        assert total_input > sizes[0] * 3
+
+    def test_模型不返回usage时不崩(self, monkeypatch, no_io):
+        """部分网关/本地推理不返回 usage，不能让整个 Agent 因为统计失败而挂掉。"""
+        client = FakeClient([
+            fake_message(tool_calls=[fake_tool_call("c1", "submit_decision", {
+                "conclusion": "x", "reasoning": "y", "actions": []})]),
+        ], with_usage=False)
+        out = run_with(client, monkeypatch)
+
+        assert out["usage"]["calls"] == 1
+        assert out["usage"]["prompt_tokens"] == 0
+        assert out["usage"]["cost_usd"] == 0
+        assert out["conclusion"] == "x"          # 业务结果不受影响

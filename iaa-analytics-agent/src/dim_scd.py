@@ -111,9 +111,18 @@ def init_dim_tables() -> None:
                 reasoning   TEXT,               -- 推理链（可解释性）
                 actions_json TEXT,              -- 建议动作（JSON 数组）
                 executed_json TEXT,             -- 实际执行结果（JSON）
-                trace_json  TEXT                -- 多轮决策轨迹（JSON）
+                trace_json  TEXT,               -- 多轮决策轨迹（JSON）
+                usage_json  TEXT                -- 本次运行的 token 用量与折算成本（JSON）
             )
         """)
+
+        # ---- 轻量迁移 ----
+        # 老库里 agent_run_history 已经存在，CREATE TABLE IF NOT EXISTS 不会补列。
+        # 这里按 PRAGMA 检查后补，保证已有数据的库也能直接跑起来（不需要手工删库）。
+        cur.execute("PRAGMA table_info(agent_run_history)")
+        existing_cols = {r[1] for r in cur.fetchall()}
+        if "usage_json" not in existing_cols:
+            cur.execute("ALTER TABLE agent_run_history ADD COLUMN usage_json TEXT")
 
         conn.commit()
     finally:
@@ -614,16 +623,32 @@ def list_sub_channels(active_only: bool = True) -> List[Dict[str, Any]]:
 def save_agent_run(status: str, conclusion: str = "", reasoning: str = "",
                    actions: Optional[List[Dict[str, Any]]] = None,
                    executed: Optional[List[Dict[str, Any]]] = None,
-                   trace: Optional[List[Dict[str, Any]]] = None) -> int:
-    """保存一次 Agent 运行记录，返回 run_id。"""
+                   trace: Optional[List[Dict[str, Any]]] = None,
+                   usage: Optional[Dict[str, Any]] = None) -> int:
+    """保存一次 Agent 运行记录，返回 run_id。
+
+    Args:
+        status: 状态（pending/executed/rejected）
+        conclusion: 一句话结论
+        reasoning: 推理链
+        actions: 建议动作列表
+        executed: 执行结果列表
+        trace: 多轮决策轨迹
+        usage: llm_cost.finalize() 的输出（token 用量 + 折算成本）。
+               为 None 时存空对象——不是所有入口都会调 LLM（比如 MCP 提交建议单）。
+
+    Returns:
+        run_id
+    """
     import json as _json
     conn = _connect()
     try:
         cur = conn.cursor()
         cur.execute(
             """INSERT INTO agent_run_history
-               (run_time, status, conclusion, reasoning, actions_json, executed_json, trace_json)
-               VALUES (?,?,?,?,?,?,?)""",
+               (run_time, status, conclusion, reasoning, actions_json, executed_json,
+                trace_json, usage_json)
+               VALUES (?,?,?,?,?,?,?,?)""",
             (
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 status,
@@ -632,6 +657,7 @@ def save_agent_run(status: str, conclusion: str = "", reasoning: str = "",
                 _json.dumps(actions or [], ensure_ascii=False),
                 _json.dumps(executed or [], ensure_ascii=False),
                 _json.dumps(trace or [], ensure_ascii=False, default=str),
+                _json.dumps(usage or {}, ensure_ascii=False, default=str),
             )
         )
         conn.commit()
@@ -676,6 +702,7 @@ def get_agent_run(run_id: int) -> Optional[Dict[str, Any]]:
         d = dict(row)
         for k in ("actions_json", "executed_json", "trace_json"):
             d[k.replace("_json", "")] = _json.loads(d.get(k) or "[]")
+        d["usage"] = _json.loads(d.get("usage_json") or "{}")
         return d
     finally:
         conn.close()
@@ -702,6 +729,7 @@ def list_agent_runs(limit: int = 20, status: Optional[str] = None) -> List[Dict[
             d["actions"] = _json.loads(d.get("actions_json") or "[]")
             d["executed"] = _json.loads(d.get("executed_json") or "[]")
             d["trace"] = _json.loads(d.get("trace_json") or "[]")
+            d["usage"] = _json.loads(d.get("usage_json") or "{}")
             result.append(d)
         return result
     finally:
