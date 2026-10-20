@@ -59,6 +59,19 @@ TARGET_MAX = 3.0                 # 上限（300%）
 
 MAX_ACTIONS_PER_RUN = 5          # 一次决策最多能带几个写动作
 
+# 删除子渠道前要求的最小累计安装量。
+#
+# 为什么删除要单独设门槛，而调预算不用：
+#   调预算是**可逆**的——调错了下一轮调回来，代价是一天的预算。
+#   删渠道是**不可逆**的——is_active 置 0 之后，历史归因断裂、学习期清零，
+#   恢复也要重新积累。所以它要求的最低证据等级必须高于调预算。
+#
+# 为什么是 100：
+#   ROI 是个**比率**，分母越小越不稳。30 次安装里差 1 个转化，
+#   ROI 就能从 0.05 跳到 0.15。100 次安装约合 3~5 个付费事件，
+#   才刚够看趋势；低于这个量级，任何结论都是噪声。
+MIN_INSTALLS_FOR_DELETE = 100
+
 VALID_ACTIONS = ("delete_sub_channel", "adjust_budget", "adjust_target")
 
 
@@ -117,7 +130,7 @@ def validate_action(action: Dict[str, Any],
 
     params = action.get("params") or {}
 
-    # ---------- 删子渠道：无数值可校验，靠前置条件和人工确认 ----------
+    # ---------- 删子渠道：形态 + 样本量 ----------
     if a_type == "delete_sub_channel":
         # 形态检查：ID 只能是 ASCII 字母/数字/下划线/连字符，长度合理。
         # 这条规则来自一次真实测试——最初只查了「长度 ≤64 且无空白」，
@@ -126,6 +139,24 @@ def validate_action(action: Dict[str, Any],
         if len(target) > 64 or not _ID_RE.match(target):
             return False, (f"delete_sub_channel: target={target!r} 形态异常，"
                            f"疑似把描述当成了 ID（合法 ID 如 ch_003）")
+
+        # 样本量门槛。
+        # 这条规则的来由值得记一笔：评测里 S02 场景连续跑 3 次、3 次都删了
+        # 一个只有 30 次安装的渠道（0/3）。而知识库里 08 篇早就写了
+        # 「样本不足时正确动作是观察不是删」——也就是说，**这条约束
+        # 写在 prompt 和知识库里都不管用**，LLM 该错还是错。
+        # 所以它必须落到确定性代码里：判断可以错，执行不能被放行。
+        inst = (current or {}).get("installs")
+        if inst is None:
+            return False, (f"delete_sub_channel: 查不到 {target} 的累计安装量，"
+                           f"没有样本量就无法判断它的 ROI 是否可信（fail-closed）")
+        if not _is_number(inst):
+            return False, f"delete_sub_channel: installs={inst!r} 不是有效数字"
+        if inst < MIN_INSTALLS_FOR_DELETE:
+            return False, (
+                f"delete_sub_channel: {target} 累计安装仅 {int(inst)} 次，"
+                f"低于删除所需的最小样本 {MIN_INSTALLS_FOR_DELETE} 次。"
+                f"样本不足时 ROI 波动可达数倍，正确动作是继续观察或加量验证，不是删除")
         return True, ""
 
     # ---------- 改预算 ----------

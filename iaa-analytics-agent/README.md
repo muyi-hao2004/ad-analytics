@@ -290,7 +290,8 @@ LLM_USD_CNY=7.1
 
 ```bash
 python eval/run_eval.py --dry-run      # 校验场景定义，不花钱
-python eval/run_eval.py --repeat 3     # 跑 8 个场景 × 3 次，约 5 分钟
+python eval/run_eval.py                # 12 条场景（8 dev + 4 holdout），约 2 分钟
+python eval/run_eval.py --split dev    # 调参时只跑 dev，别碰 holdout
 ```
 
 ### 不需要真实数据集

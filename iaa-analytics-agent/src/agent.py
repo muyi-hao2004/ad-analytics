@@ -168,6 +168,39 @@ def _list_countries(campaign_id: str) -> List[Dict[str, Any]]:
         conn.close()
 
 
+def _get_channel_installs(sub_channel: str) -> Optional[int]:
+    """某子渠道的**累计**安装量，给护栏判断样本是否足够。
+
+    为什么用累计而不是单日：
+        判断「这个 ROI 可不可信」看的是这个渠道一共观察了多少次安装，
+        单日安装量只反映当天投了多少钱。看单日会把「今天投得少」
+        误判成「样本不足」。
+
+    为什么返回 Optional 而不是 0：
+        两者语义完全不同——0 是「确实没量」，None 是「查不到/数据缺失」。
+        护栏对这两种情况的处理也不同（None 直接 fail-closed 拒绝）。
+        这里如果偷懒返回 0，就必须在护栏里区分「真 0」和「查不到」，做不到。
+    """
+    if not sub_channel:
+        return None
+    try:
+        import pandas as pd
+        path = config.ADS_DIR / "sub_channel_table.parquet"
+        if not path.exists():
+            return None
+        df = pd.read_parquet(path)
+        if "sub_channel" not in df.columns or "installs" not in df.columns:
+            return None
+        rows = df[df["sub_channel"] == sub_channel]
+        if rows.empty:
+            return None
+        return int(rows["installs"].sum())
+    except Exception:
+        # 读不到就当「查不到」，让护栏 fail-closed。绝不能吞掉异常返回 0，
+        # 那等于告诉护栏「这个渠道没有量」，反而可能放行删除。
+        return None
+
+
 # ============================================================
 # 2. 工具定义（说明书）+ 工具注册表（查表执行）
 # ============================================================
@@ -1107,6 +1140,10 @@ def _execute_action(plat, action: Dict[str, Any]) -> Dict[str, Any]:
     current: Dict[str, Any] = {}
     if a_type in ("adjust_budget", "adjust_target"):
         current = _get_current_cfg(target, params.get("country", ""))
+    elif a_type == "delete_sub_channel":
+        # 删除要看样本量，不看预算。查不到时 _get_channel_installs 返回 None，
+        # 护栏会据此 fail-closed 拒绝——不能因为「读数据失败」就放行删除。
+        current = {"installs": _get_channel_installs(target)}
 
     ok, why = guardrails.validate_action(action, current)
     if not ok:

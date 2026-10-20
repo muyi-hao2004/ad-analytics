@@ -114,17 +114,21 @@ def task_demo() -> None:
     _run([sys.executable, "demo_multi_round.py"], cwd=SRC, desc="多轮 Agent 演示")
 
 
-def task_eval(repeat: int = 1, only: str | None = None) -> None:
+def task_eval(repeat: int = 1, only: str | None = None,
+              split: str = "all") -> None:
     """跑决策评测。
 
     Args:
         repeat: 每个场景重复次数。**建议 3**——单次结果会翻转（实测 S04 有 1/3 误删）。
         only: 只跑指定场景，如 "S02,S04"
+        split: all / dev / holdout。holdout 只应在改完代码后跑一次——
+               边看结果边改，它就会退化成 dev，失去「没见过」的意义。
     """
-    cmd = [sys.executable, "eval/run_eval.py", "--repeat", str(repeat)]
+    cmd = [sys.executable, "eval/run_eval.py", "--repeat", str(repeat),
+           "--split", split]
     if only:
         cmd += ["--only", only]
-    _run(cmd, desc=f"决策评测（每场景 {repeat} 次）")
+    _run(cmd, desc=f"决策评测（每场景 {repeat} 次，{split}）")
 
 
 def task_retrieval(mode: str = "hybrid") -> None:
@@ -176,11 +180,13 @@ def main() -> None:
                         help="每场景重复次数，建议 3")
     p_eval.add_argument("--only", type=str, default=None,
                         help="只跑指定场景，如 S02,S04")
+    p_eval.add_argument("--split", choices=["all", "dev", "holdout"], default="all",
+                        help="dev=可调参，holdout=只验证不调参，默认全跑")
 
     args = parser.parse_args()
 
     if args.task == "eval":
-        task_eval(repeat=args.repeat, only=args.only)
+        task_eval(repeat=args.repeat, only=args.only, split=args.split)
     elif args.task == "retrieval":
         task_retrieval(mode=args.mode)
     else:

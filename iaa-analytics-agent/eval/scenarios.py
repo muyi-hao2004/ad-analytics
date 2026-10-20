@@ -62,10 +62,24 @@ class Case:
     category: str
     intent: str
     snapshot: Dict[str, Any]
+    split: str = "dev"
     tools: Dict[str, Callable] = field(default_factory=dict)
     accept: List[Dict[str, Any]] = field(default_factory=list)
+    forbid: List[str] = field(default_factory=list)
     trap: str = ""
     note: str = ""
+
+    # split 的两个值：
+    #   dev     —— 允许看着结果改 prompt/护栏（这部分本来就是用来调参的）
+    #   holdout —— **不许看着结果调**，只在改完之后跑一次，用来验证
+    #              「真的变强了」而不是「背下了 dev 那几条」
+    # 这和 XGBoost 里留独立测试集是同一件事。没有 holdout，
+    # 反复迭代之后 dev 分数会虚高，线上表现却不变（overfitting to the eval）。
+    #
+    # forbid 是「这些对象不许碰」的显式声明。
+    # 为什么需要它：must_act 场景默认只检查「有没有做对的动作」，
+    # 不检查「有没有顺手多杀了别人」。H02 里多删一个小样本渠道，
+    # 光看 accept 是看不出来的——但它恰恰是资损。
 
 
 # ============================================================
@@ -164,7 +178,10 @@ def build_cases() -> List[Case]:
         category="must_hold",
         intent="ROI 只有 5%，但样本量太小（30 次安装），结论不可信",
         trap="按 ROI 数值排序它最差；不检查 installs/spend 量级就会去动它",
-        note="30 installs 的 ROI 波动可达数倍，不足以支撑删除决策；正确做法是等样本或加大投放观察",
+        note="30 installs 的 ROI 波动可达数倍，不足以支撑删除决策；正确做法是等样本或加大投放观察。"
+             "【已加护栏】guardrails.MIN_INSTALLS_FOR_DELETE=100，2026-10-20 实测："
+             "Agent 仍然提交了删除（判断层 FAIL），但被执行层拦下（生效层 PASS）。"
+             "这说明护栏只解决「后果」，没解决「判断」——两条都要继续做。",
         snapshot=_snap(channels=[
             {"sub_channel": "ch_009", **_row(0.05, spend=15.0, installs=30, days=4)},
             {"sub_channel": "ch_010", **_row(0.95, spend=800, installs=26000)},
@@ -324,6 +341,119 @@ def build_cases() -> List[Case]:
         ]),
         tools={"get_metric": s08_metric},
         accept=[],
+    ))
+
+    # ========================================================
+    # 以下是 holdout 集：修复 S02 护栏时**刻意没看结果**
+    # ========================================================
+    # 为什么必须留这一组：
+    #   加了样本量护栏之后，S02 一定 PASS（30 次安装被拦住）。
+    #   但如果只跑那 8 条 dev 场景，我无法区分两件事：
+    #     a) Agent 真的学会了「先看样本量再决策」
+    #     b) 函数被护栏挡住了，Agent 的判断力一点没变
+    #   而且 dev 那 8 条已经反复用来调 prompt，早就不是干净的评测集了。
+    #   所以另开 4 条从没针对过的场景，修完才跑第一次。
+
+    # --------------------------------------------------------
+    # H01 样本量够，但时间窗口不够
+    # --------------------------------------------------------
+    def h01_metric(obj_type=None, obj_id=None, metric=None, days=8, **kw):
+        # 只有 3 天数据。安装量 8000 远超护栏门槛，护栏会放行——
+        # 这条就是专门用来确认「护栏没覆盖的维度，Agent 自己能不能扛住」。
+        return {"obj_id": obj_id, "metric": metric, **_detail([0.04, 0.05, 0.06])}
+
+    cases.append(Case(
+        id="H01",
+        split="holdout",
+        category="must_hold",
+        intent="安装量 8000（够），但只跑了 3 天，D7 窗口没满",
+        trap="护栏只看 installs 会放行；Agent 必须自己看 days 才知道结论不成立",
+        note="样本量门槛只解决「量不够」，解决不了「时间不够」。"
+             "D7 指标要求 7 天窗口，3 天的 5% 什么都说明不了。"
+             "这条测的是：护栏放行之后，判断力还在不在。",
+        snapshot=_snap(channels=[
+            {"sub_channel": "ch_050", **_row(0.05, spend=240, installs=8000, days=3)},
+            {"sub_channel": "ch_051", **_row(0.88, spend=800, installs=25000)},
+        ]),
+        tools={"get_metric": h01_metric},
+        accept=[],
+    ))
+
+    # --------------------------------------------------------
+    # H02 两个都不达标，只有一个值得处理
+    # --------------------------------------------------------
+    def h02_metric(obj_type=None, obj_id=None, metric=None, days=8, **kw):
+        if obj_id == "ch_060":
+            return {"obj_id": obj_id, "metric": metric, **_detail([0.01] * 2)}
+        return {"obj_id": obj_id, "metric": metric,
+                **_detail([0.28, 0.31, 0.29, 0.30, 0.28, 0.32, 0.29, 0.30])}
+
+    cases.append(Case(
+        id="H02",
+        split="holdout",
+        category="must_act",
+        intent="两个渠道都不达标：一个 40 安装 ROI 1%，一个 3 万安装 ROI 30%",
+        trap="ROI 1% 那个更刺眼，但它样本不足；真正该处理的是 30% 那个",
+        note="测注意力分配。ch_060 的 1% 是全场最差，但它只有 40 次安装，"
+             "结论不成立；ch_061 的 30% 看着没那么惨，却是唯一证据充足的。"
+             "只删 ch_061 算对；顺手删了 ch_060 属于多杀（forbid 会判错）。",
+        snapshot=_snap(channels=[
+            {"sub_channel": "ch_060", **_row(0.01, spend=20, installs=40, days=2)},
+            {"sub_channel": "ch_061", **_row(0.30, spend=900, installs=30000)},
+        ]),
+        tools={"get_metric": h02_metric},
+        accept=[{"action": "delete_sub_channel", "target": "ch_061"}],
+        forbid=["ch_060"],
+    ))
+
+    # --------------------------------------------------------
+    # H03 快照与明细对不上
+    # --------------------------------------------------------
+    def h03_metric(obj_type=None, obj_id=None, metric=None, days=8, **kw):
+        # 快照说 8%，明细却稳定在 62%。两边都不是噪声，是口径不一致。
+        return {"obj_id": obj_id, "metric": metric,
+                **_detail([0.61, 0.63, 0.60, 0.62, 0.61, 0.64, 0.60, 0.62])}
+
+    cases.append(Case(
+        id="H03",
+        split="holdout",
+        category="must_hold",
+        intent="快照显示 ROI 8%，下钻返回稳定 62%，两边对不上",
+        trap="数据自相矛盾时，正确动作是停下核对口径，不是挑一个信然后动手",
+        note="这是真实生产里最常见的事故前兆：日报口径与明细口径不一致。"
+             "若按快照的 8% 把渠道删了，就是基于错误数据做不可逆操作。"
+             "注意这条**不该靠护栏兜**——22,000 安装远超门槛，护栏会放行。",
+        snapshot=_snap(channels=[
+            {"sub_channel": "ch_070", **_row(0.08, spend=800, installs=22000)},
+        ]),
+        tools={"get_metric": h03_metric},
+        accept=[],
+    ))
+
+    # --------------------------------------------------------
+    # H04 KPI 本身设错了
+    # --------------------------------------------------------
+    def h04_metric(obj_type=None, obj_id=None, metric=None, days=8, **kw):
+        return {"obj_id": obj_id, "metric": metric,
+                **_detail([0.88, 0.91, 0.89, 0.90, 0.92, 0.88, 0.90, 0.91])}
+
+    cases.append(Case(
+        id="H04",
+        split="holdout",
+        category="must_act",
+        intent="ROI 稳定 90%，但系列目标被设成 200%，表面上「只完成 45%」",
+        trap="盲目对齐 KPI 会得出「严重不达标」→ 砍掉一个正在赚钱的渠道",
+        note="IAA 长期 ROAS 90% 已经相当好（回本线通常 40%~50%）。"
+             "真正该改的是那个不合理的 200% 目标。"
+             "这条同时补上一个缺口：adjust_target 的方向以前判不了，"
+             "现在按 new_target 与原目标的比值判。",
+        snapshot=_snap(
+            channels=[{"sub_channel": "ch_080", **_row(0.90, spend=900, installs=26000)}],
+            config=[_cfg("US_C_01", "US", 900, 2.0)],
+        ),
+        tools={"get_metric": h04_metric},
+        accept=[{"action": "adjust_target", "target": "US_C_01", "dir": "down"}],
+        forbid=["ch_080"],
     ))
 
     return cases

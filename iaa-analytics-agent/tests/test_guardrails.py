@@ -49,8 +49,51 @@ class TestValidateAction:
 
     def test_正常删除通过(self):
         ok, _ = g.validate_action({
-            "action": "delete_sub_channel", "target": "ch_003", "reason": "连续7天 ROI<50%"})
+            "action": "delete_sub_channel", "target": "ch_003", "reason": "连续7天 ROI<50%"},
+            current={"installs": 21_000})
         assert ok
+
+    # ---------- 删除的样本量门槛 ----------
+    # 这几条规则来自评测实测：S02 场景连跑 3 次、3 次都删了一个只有
+    # 30 次安装的渠道。而知识库里早就写了「样本不足应观察不应删」——
+    # 说明这类约束写在 prompt 里不管用，必须落成确定性代码。
+
+    def test_样本不足时删除被拒(self):
+        ok, why = g.validate_action({
+            "action": "delete_sub_channel", "target": "ch_009", "reason": "ROI 只有 5%"},
+            current={"installs": 30})
+        assert not ok
+        assert "样本" in why
+
+    def test_查不到安装量时删除被拒(self):
+        """查不到 → fail-closed。不能因为读数据失败就放行删除。"""
+        ok, why = g.validate_action({
+            "action": "delete_sub_channel", "target": "ch_003", "reason": "ROI 低"},
+            current={})
+        assert not ok
+        assert "安装量" in why
+
+    def test_安装量刚好达门槛通过(self):
+        """边界值：等于阈值应当放行，避免规则写成 >= 还是 > 的歧义。"""
+        ok, _ = g.validate_action({
+            "action": "delete_sub_channel", "target": "ch_003", "reason": "ROI 低"},
+            current={"installs": g.MIN_INSTALLS_FOR_DELETE})
+        assert ok
+
+    def test_安装量少一次被拒(self):
+        ok, why = g.validate_action({
+            "action": "delete_sub_channel", "target": "ch_003", "reason": "ROI 低"},
+            current={"installs": g.MIN_INSTALLS_FOR_DELETE - 1})
+        assert not ok
+        assert "样本" in why
+
+    def test_安装量是字符串被拒(self):
+        """LLM 传 "300" 这种字符串时不能被当成数字放过去。"""
+        ok, why = g.validate_action({
+            "action": "delete_sub_channel", "target": "ch_003", "reason": "ROI 低"},
+            current={"installs": "30000"})
+        assert not ok
+        assert "有效数字" in why
 
     # ---------- 预算 ----------
 

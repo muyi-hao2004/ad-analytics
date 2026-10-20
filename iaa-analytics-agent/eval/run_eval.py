@@ -160,10 +160,14 @@ def dry_run(cases: List[scenarios.Case]) -> int:
         errs = []
         if c.category not in ("must_hold", "must_act", "known_gap"):
             errs.append(f"category 非法: {c.category}")
+        if c.split not in ("dev", "holdout"):
+            errs.append(f"split 非法: {c.split}")
         if c.category == "must_hold" and c.accept:
             errs.append("must_hold 场景不应有 accept 规则")
         if c.category == "must_act" and not c.accept:
             errs.append("must_act 场景必须给出 accept 规则")
+        if c.split == "holdout" and c.category == "must_hold" and c.forbid:
+            errs.append("must_hold 已经是「什么都不许动」，forbid 冗余")
         missing = required - set(c.snapshot)
         if missing:
             errs.append(f"快照缺字段: {missing}")
@@ -172,6 +176,20 @@ def dry_run(cases: List[scenarios.Case]) -> int:
                 errs.append(f"accept 里的动作不存在: {exp.get('action')}")
             if exp.get("dir") not in (None, "up", "down"):
                 errs.append(f"dir 非法: {exp.get('dir')}")
+
+        # forbid 的对象必须真的出现在快照里，否则这条规则永远触发不了——
+        # 写错的 forbid 不会报错，只会静默失效，比没有更糟。
+        known_targets = set()
+        for row in c.snapshot.get("子渠道表现") or []:
+            known_targets.add(row.get("sub_channel"))
+        for row in c.snapshot.get("素材表现") or []:
+            known_targets.add(row.get("creative_id"))
+        for cfg in c.snapshot.get("当前配置") or []:
+            known_targets.add(cfg.get("campaign_id"))
+        for t in c.forbid:
+            if t not in known_targets:
+                errs.append(f"forbid 里的 {t!r} 不在快照中，这条规则永远不会触发")
+
         for name in c.tools:
             if not hasattr(agent, f"_tool_{name}"):
                 errs.append(f"假工具名不存在: _tool_{name}")
@@ -184,10 +202,13 @@ def dry_run(cases: List[scenarios.Case]) -> int:
         else:
             mark = {"must_hold": "不动", "must_act": "应动",
                     "known_gap": "限制"}[c.category]
-            print(f"  ✓ {c.id}  [{mark}]  {c.intent}")
+            flag = "" if c.split == "dev" else " [holdout]"
+            print(f"  ✓ {c.id}  [{mark}]  {c.intent}{flag}")
 
     print()
-    print(f"共 {len(cases)} 个场景，{problems} 个有问题")
+    n_hold = len([c for c in cases if c.split == "holdout"])
+    print(f"共 {len(cases)} 个场景（dev {len(cases) - n_hold} / holdout {n_hold}），"
+          f"{problems} 个有问题")
     return 0 if problems == 0 else 1
 
 
@@ -195,12 +216,14 @@ def dry_run(cases: List[scenarios.Case]) -> int:
 # 报表
 # ============================================================
 
-def print_report(results: List[Dict[str, Any]], summary: Dict[str, Any]) -> None:
+def print_report(results: List[Dict[str, Any]]) -> None:
     print()
     print("=" * 70)
     print("逐场景结果")
     print("=" * 70)
     for r in results:
+        split = judge_mod.find_case_split(r["case_id"])
+        tag = "" if split == "dev" else " [holdout]"
         # known_gap 不能显示 PASS：它没被测过，只是在当前架构下不可达。
         # 显示 PASS 会让人误以为这条覆盖到了，是最危险的一种误读。
         if judge_mod.find_case_category(r["case_id"]) == "known_gap":
@@ -210,7 +233,7 @@ def print_report(results: List[Dict[str, Any]], summary: Dict[str, Any]) -> None
 
         rate = r.get("pass_rate")
         rate_txt = f"  ({r['attempts']} 次中 {r['passes']} 次)" if rate is not None else ""
-        print(f"  {r['case_id']}  {flag}  {r['intent']}{rate_txt}")
+        print(f"  {r['case_id']}  {flag}  {r['intent']}{tag}{rate_txt}")
 
         if flag == "GAP ":
             print(f"        └ 已知架构限制，不计入指标（见 scenarios.py 中该场景 note）")
@@ -220,31 +243,52 @@ def print_report(results: List[Dict[str, Any]], summary: Dict[str, Any]) -> None
         else:
             print(f"        └ {r['detail']}")
 
-    s = summary
-    print()
-    print("=" * 70)
-    print("三层指标（不合并成一个总分）")
-    print("=" * 70)
-    sa, rc, pc = s["safety"], s["recall"], s["precision"]
-    print(f"  safety     {sa['passed']}/{sa['total']}   "
-          f"假阳性 {sa['false_positive']} 次   ← 不该动的有没有动（代价最高）")
-    print(f"  recall     {rc['passed']}/{rc['total']}   "
-          f"漏检 {rc['false_negative']} 次     ← 该动的有没有动")
-    print(f"  precision  对象错 {pc['wrong_target']} 次 / "
-          f"方向错 {pc['wrong_direction']} 次")
-    print()
-    print(f"  合计 {s['passed']}/{s['cases']} 通过  "
-          f"｜ 成本 ${s['cost_usd']:.4f}（¥{s['cost_usd'] * 7.1:.4f}）  "
-          f"｜ {s['total_tokens']:,} token")
+        # 判断层失败但生效层通过 = 护栏兜住了。这个信息必须显示，
+        # 否则读者会以为这条通过了，而实际上 Agent 的想法是错的。
+        blocked = r.get("blocked") or []
+        if blocked:
+            why = blocked[0].get("blocked_reason", "")
+            eff = "生效层 PASS（护栏兜住）" if r.get("effective_verdict") == "pass" else "生效层仍 FAIL"
+            print(f"        └ 护栏拦下 {len(blocked)} 个动作 → {eff}")
+            print(f"           {why}")
 
-    # 失败按严重度排序，先看最危险的
-    fails = [r for r in results if r["verdict"] != "pass"]
-    if fails:
-        fails.sort(key=lambda r: -judge_mod.SEVERITY.get(r.get("failure_type") or "", 0))
-        worst = fails[0]
-        print()
-        print(f"  最严重的失败：{worst['case_id']} "
-              f"[{judge_mod.SEVERITY_LABEL.get(worst.get('failure_type') or '', '?')}]")
+
+def print_metrics(summary: Dict[str, Any], label: str = "") -> None:
+    """打印一组三层指标。
+
+    分成判断层 / 生效层两列：
+        判断层 = Agent 自己有没有想错
+        生效层 = 这些想法里有多少真的被执行了
+    只看判断层，护栏的收益永远显示不出来；只看生效层，
+    又会把「幸好被拦住了」误读成「Agent 判断对了」。
+    """
+    s = summary
+    head = f"三层指标 · {label}" if label else "三层指标（不合并成一个总分）"
+    print()
+    print("=" * 70)
+    print(head)
+    print("=" * 70)
+    if s["scored"] == 0:
+        print("  （本组没有计分场景）")
+        return
+
+    sa, rc, pc, en = s["safety"], s["recall"], s["precision"], s["enforcement"]
+    print(f"  safety     判断 {sa['passed']}/{sa['total']}   "
+          f"生效 {sa['effective_passed']}/{sa['total']}   "
+          f"← 不该动的时候动没动（代价最高）")
+    print(f"  recall     判断 {rc['passed']}/{rc['total']}   "
+          f"生效 {rc['effective_passed']}/{rc['total']}   "
+          f"← 该动的时候动没动")
+    print(f"  precision  对象错 {pc['wrong_target']} 次 / 方向错 {pc['wrong_direction']} 次")
+    if en["blocked_actions"]:
+        print(f"  护栏拦截   {en['blocked_actions']} 个动作，涉及 {en['cases_with_block']} 个场景"
+              f"   ← 判断错了，但没造成后果")
+    if en["over_blocked_cases"]:
+        print(f"  ！过度拦截 {en['over_blocked_cases']} 个场景 "
+              f"({', '.join(en['over_blocked_ids'])})   ← 护栏把正确动作也拦了")
+    print(f"  合计 {s['passed']}/{s['scored']} 计分通过  "
+          f"｜ ${s['cost_usd']:.4f}（¥{s['cost_usd'] * 7.1:.4f}）"
+          f"｜ {s['total_tokens']:,} token")
 
 
 def main() -> int:
@@ -256,9 +300,13 @@ def main() -> int:
                     help="每个场景重复跑几次。LLM 输出有随机性，"
                          "单次结果可能翻转；安全相关的场景建议 --repeat 3")
     ap.add_argument("--json", default="", help="把结果写到指定 JSON 文件")
+    ap.add_argument("--split", choices=["all", "dev", "holdout"], default="all",
+                    help="只跑某个分区。dev=可调参，holdout=只验证不调参")
     args = ap.parse_args()
 
     cases = scenarios.build_cases()
+    if args.split != "all":
+        cases = [c for c in cases if c.split == args.split]
     if args.only:
         wanted = {x.strip().upper() for x in args.only.split(",") if x.strip()}
         cases = [c for c in cases if c.id.upper() in wanted]
@@ -294,16 +342,42 @@ def main() -> int:
             print(" PASS" if r["verdict"] == "pass" else " FAIL")
 
     summary = judge_mod.summarize(results)
-    print_report(results, summary)
+    print_report(results)
+    print_metrics(summary, "全部")
+
+    # dev / holdout 分开报。
+    # 为什么不能只看总数：holdout 的水平本来就该低于 dev——
+    # 它是「没见过的新情况」。两个数放一起看，才能判断这次改动是真的
+    # 提升了泛化，还是只把 dev 那几条背下来了。
+    dev = [r for r in results if judge_mod.find_case_split(r["case_id"]) == "dev"]
+    hold = [r for r in results if judge_mod.find_case_split(r["case_id"]) == "holdout"]
+    if dev and hold:
+        print_metrics(judge_mod.summarize(dev), "dev（可以看着它调参）")
+        print_metrics(judge_mod.summarize(hold), "holdout（只验证，不许看着它调参）")
+
+    # 失败按严重度排序，先看最危险的
+    fails = [r for r in results if r["verdict"] != "pass"
+             and judge_mod.find_case_category(r["case_id"]) != "known_gap"]
+    if fails:
+        fails.sort(key=lambda r: -judge_mod.SEVERITY.get(r.get("failure_type") or "", 0))
+        worst = fails[0]
+        print()
+        print(f"  最严重的失败：{worst['case_id']} "
+              f"[{judge_mod.SEVERITY_LABEL.get(worst.get('failure_type') or '', '?')}]")
 
     if args.json:
         Path(args.json).write_text(
-            json.dumps({"summary": summary, "results": results},
+            json.dumps({"summary": summary,
+                        "summary_dev": judge_mod.summarize(dev) if dev else None,
+                        "summary_holdout": judge_mod.summarize(hold) if hold else None,
+                        "results": results},
                        ensure_ascii=False, indent=2, default=str),
             encoding="utf-8")
         print(f"\n结果已写入 {args.json}")
 
-    return 0 if summary["passed"] == summary["cases"] else 1
+    # 退出码只看判断层。护栏兜住的那些不该算「通过」——
+    # CI 里绿灯的含义必须是「Agent 判断对了」，不是「幸好被拦住了」。
+    return 0 if summary["passed"] == summary["scored"] else 1
 
 
 if __name__ == "__main__":
