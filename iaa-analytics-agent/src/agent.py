@@ -5,15 +5,18 @@ Agent 决策核心：快照组装 + 多轮 Function Calling + 决策解析
 
 分层结构：
   1. build_snapshot()   —— 把「派生指标 + 当前配置 + 最近日志」压缩成精简 JSON（日报的数据版）
-  2. TOOLS_DEFINITION   —— 工具说明书（告诉 LLM 有哪些工具、参数怎么填）
-  3. TOOLS_REGISTRY     —— 名字→函数 的查表（你的代码真正执行的地方）
-  4. run_agent()        —— 多轮循环：LLM 查数据 → 你执行 → 结果回传 → LLM 再查/给决策
+  2. READ_TOOLS         —— 读工具说明书（原生 tools 参数传给模型）
+     SUBMIT_DECISION_TOOL —— 终态工具：LLM 唯一能"表达写意图"的出口
+  3. _build_tool_registry —— 名字→函数 的查表（你的代码真正执行的地方，只含读工具）
+  4. run_llm_loop()     —— 多轮循环：LLM 调工具 → 你执行 → 结果回传 → LLM 再查/提交决策
 
 设计原则（为什么这么做）：
   - 不喂 HTML 报表（那是给人看的界面，LLM 读表格 HTML 又慢又易错）
   - 不喂原始事实表（太大、太细，且让 LLM 自己算派生指标容易错）
   - 快照只给「结论」，需要细节让 LLM 通过 get_metric/get_logs 按需查（多轮 Function Calling）
   - LLM 从头到尾不执行任何代码，它只「表达意图」，你的代码查表执行
+  - **读写分离**：LLM 在分析阶段只有读权限，写动作只能通过 submit_decision 提交建议单，
+    由人 approve 后才执行，且执行前还要过 guardrails（见 2.0）
 """
 
 from typing import List, Dict, Any, Optional
@@ -26,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import config
 import dim_scd
+import guardrails
 import knowledge_base
 import semantic_layer
 from dotenv import load_dotenv
@@ -168,10 +172,27 @@ def _list_countries(campaign_id: str) -> List[Dict[str, Any]]:
 # ============================================================
 
 # ---- 2.1 工具说明书：告诉 LLM「有哪些工具、参数怎么填」 ----
-# 这是 Function Calling 的核心。LLM 读了它就知道该输出什么样的 JSON。
+# 这是 Function Calling 的核心：用原生 tools 参数传给模型，模型直接返回
+# 结构化的 tool_calls，不需要我们在 prompt 里教它「输出什么 JSON 格式」。
 # 参数里的 enum 是「约束」，防止 LLM 乱填不存在的值。
+#
+# ⚠️ 这一份里**只有读工具**。写操作（删/调预算/调目标）故意不在这里，
+#    原因见下面 2.0 的说明。这是本项目最重要的一条架构约束。
 
-TOOLS_DEFINITION = [
+# ---- 2.0 读写分离：为什么写操作不能是「工具」 ----
+#
+# 反面做法（已修正）：把 delete_sub_channel / adjust_budget / adjust_target
+# 也注册进工具注册表。后果是 LLM 在**分析循环内部**就能直接触发写操作——
+# 它查完数据顺手调一下 delete_sub_channel，平台就真的改了，人根本没机会看。
+# 那样的话 approval 流程（pending → 人工确认）形同虚设，只是写在函数名上的装饰。
+#
+# 正确做法：LLM 在分析阶段**只有读权限**。它想做什么写操作，只能通过
+# submit_decision 提交一份「建议单」，这份建议单落库为 pending，
+# 由人 approve 之后才由 _execute_action 执行（且执行前再过一遍护栏）。
+#
+# 一句话：**权限边界要靠代码结构保证，不能靠 prompt 里写"不要直接删"。**
+
+READ_TOOLS = [
     {
         "name": "get_metric",
         "description": "查「单个对象」某指标最近几天的逐日明细（下钻）。"
@@ -283,50 +304,6 @@ TOOLS_DEFINITION = [
         },
     },
     {
-        "name": "delete_sub_channel",
-        "description": "删除一个子渠道（标记停用，不可逆）。"
-                       "前置条件（必须全部满足才调用）：① 该子渠道 D7 ROI 明显低于 70% 目标；"
-                       "② 已用 get_metric 确认是「持续差」而非单日暴跌；③ 已用 get_logs 确认近期未删除过。"
-                       "边界：这是危险写操作，宁可多查一轮也不可误删；不确定就 finish 不动手。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "target": {"type": "string", "description": "要删除的子渠道ID，如 ch_003。必须是你在前面已经用 get_metric/get_logs 确认过的对象ID，不要传未经验证的对象。"},
-            },
-            "required": ["target"],
-        },
-    },
-    {
-        "name": "adjust_target",
-        "description": "调整某系列某国家的目标值（ROAS%，如 0.7 表示 70%）。"
-                       "触发场景：当前目标值不合理（过高导致误判、过低导致误删），需要校准目标。"
-                       "边界：只改「目标」不改「预算」（改预算用 adjust_budget）；改之前先确认目标确实不合理。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "target": {"type": "string", "description": "系列ID，如 US_A_01"},
-                "country": {"type": "string", "description": "国家代码，如 US"},
-                "new_target": {"type": "number", "description": "新目标值（小数，如 0.7）"},
-            },
-            "required": ["target", "country", "new_target"],
-        },
-    },
-    {
-        "name": "adjust_budget",
-        "description": "调整某系列某国家的预算（美元）。"
-                       "触发场景：表现好（ROI 达标且量充足）可加预算放大，表现差可降预算控制损失。"
-                       "边界：只改「预算」不改「目标」（改目标用 adjust_target）；加预算前确认 ROI 稳定达标。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "target": {"type": "string", "description": "系列ID，如 US_A_01"},
-                "country": {"type": "string", "description": "国家代码，如 US"},
-                "new_budget": {"type": "number", "description": "新预算（美元）"},
-            },
-            "required": ["target", "country", "new_budget"],
-        },
-    },
-    {
         "name": "search_knowledge",
         "description": "检索优化师「行业经验/方法论」知识库（RAG，文本检索）。"
                        "触发场景：需要参考「这类问题通常怎么处理」的经验时，例如「ROI 低于目标该怎么下钻」「换素材的标准是什么」。"
@@ -364,6 +341,94 @@ TOOLS_DEFINITION = [
         },
     },
 ]
+
+
+# ---- 2.1b 终态工具：LLM 唯一的「表达写意图」出口 ----
+#
+# 这是一个**工具**，但它不执行任何写操作，只是把决策结构化地交出来。
+# 调用它 = 「我分析完了，这是我的结论和我想做的动作」，然后循环结束，
+# 动作落库为 pending 建议单，等人 approve。
+#
+# 为什么用工具而不是「让模型输出一段 JSON 文本」：
+#   1. 参数受 schema 约束，模型没法漏字段或类型写错
+#   2. 我们能拿到完整的 arguments 字符串，解析失败率远低于从自由文本里抠 {}
+#   3. 决策结构（conclusion / reasoning / actions）有明确的必填项，可校验
+
+SUBMIT_DECISION_TOOL = {
+    "name": "submit_decision",
+    "description": "分析完成后，用本工具提交最终决策。这是你唯一的收尾方式——"
+                   "没有要优化的动作时也要调用它，actions 传空数组。"
+                   "注意：调用本工具**不会**执行任何写操作，只是把建议交给人工确认。",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "conclusion": {
+                "type": "string",
+                "description": "一句话总结你的判断（<=60字）",
+            },
+            "reasoning": {
+                "type": "string",
+                "description": "完整推理链：你看了哪些数据、发现了什么、"
+                               "为什么得出这个结论、以及**为什么不做某些操作**。"
+                               "这是给人看的可解释性说明，不要省略。",
+            },
+            "actions": {
+                "type": "array",
+                "description": f"建议执行的写动作，最多 {guardrails.MAX_ACTIONS_PER_RUN} 个。"
+                               "没有就传空数组。每个动作都必须写 reason。",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": list(guardrails.VALID_ACTIONS),
+                            "description": "delete_sub_channel=删子渠道；"
+                                           "adjust_budget=调预算；adjust_target=调目标",
+                        },
+                        "target": {
+                            "type": "string",
+                            "description": "目标对象 ID：删渠道填子渠道ID（ch_003）；"
+                                           "调预算/调目标填系列ID（US_A_01）",
+                        },
+                        "params": {
+                            "type": "object",
+                            "description": "参数。adjust_budget 需要 country + new_budget；"
+                                           "adjust_target 需要 country + new_target；"
+                                           "delete_sub_channel 不需要参数",
+                            "properties": {
+                                "country": {"type": "string", "description": "国家代码，如 US"},
+                                "new_budget": {"type": "number",
+                                               "description": f"新预算（USD），"
+                                                              f"区间 {guardrails.BUDGET_MIN}~"
+                                                              f"{guardrails.BUDGET_MAX}，"
+                                                              f"单次变动不超过 "
+                                                              f"{guardrails.BUDGET_MAX_RATIO}x"},
+                                "new_target": {"type": "number",
+                                               "description": f"新 ROAS 目标（小数），"
+                                                              f"区间 {guardrails.TARGET_MIN}~"
+                                                              f"{guardrails.TARGET_MAX}"},
+                            },
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "为什么做这个动作，以及依据了哪些数据",
+                        },
+                    },
+                    "required": ["action", "target", "reason"],
+                },
+            },
+        },
+        "required": ["conclusion", "reasoning", "actions"],
+    },
+}
+
+# 传给模型的完整工具清单（原生 tools 参数用，需要包一层 type=function）
+TOOLS_DEFINITION = READ_TOOLS + [SUBMIT_DECISION_TOOL]
+
+
+def _openai_tools() -> List[Dict[str, Any]]:
+    """把内部工具定义转成 OpenAI tools 参数格式。"""
+    return [{"type": "function", "function": t} for t in TOOLS_DEFINITION]
 
 
 # ---- 2.2 读工具的真实实现（参数化：一个函数吃一类查询）----
@@ -597,8 +662,15 @@ def _tool_get_metric_definition(metric: str) -> Dict[str, Any]:
 # ---- 2.3 工具注册表：名字 → 函数（加工具只在这里加一行）----
 # 写工具（delete/adjust）复用 platform_layer 的 mock 平台实现。
 
-def _build_tool_registry(plat):
-    """把「读工具」和「写工具」统一装进一张名字→函数的表。"""
+def _build_tool_registry(plat=None) -> Dict[str, Any]:
+    """
+    把「读工具」装进名字→函数的表。
+
+    ⚠️ 这里**故意不含写工具**。写操作不在 LLM 可调用的范围内，
+    只能通过 submit_decision 提交建议、人工 approve 后由 _execute_action 执行。
+
+    保留 plat 参数只是为了兼容旧调用点；读工具不需要平台实例。
+    """
     return {
         "get_metric": _tool_get_metric,
         "get_logs": _tool_get_logs,
@@ -606,12 +678,6 @@ def _build_tool_registry(plat):
         "get_trend_with_ops": _tool_get_trend_with_ops,
         "search_knowledge": _tool_search_knowledge,
         "get_metric_definition": _tool_get_metric_definition,
-        "delete_sub_channel": lambda target, **kw: plat.delete_sub_channel(
-            target, operator="agent", reason=kw.get("reason", "Agent 自动优化")),
-        "adjust_target": lambda target, country, new_target, **kw: plat.adjust_target(
-            target, country, new_target, operator="agent", reason=kw.get("reason", "Agent 自动优化")),
-        "adjust_budget": lambda target, country, new_budget, **kw: plat.adjust_budget(
-            target, country, new_budget, operator="agent", reason=kw.get("reason", "Agent 自动优化")),
     }
 
 
@@ -631,7 +697,13 @@ SYSTEM_PROMPT = """你是一个海外 IAA（网赚类）广告投放的资深优
 3. 当你需要判断「某指标的变化是不是某次操作导致的」（因果归因）时，用 get_trend_with_ops，
    它会把逐日趋势和操作日志对齐到同一时间轴，能看清「操作前 vs 操作后」的指标变化
 4. 查清楚后再做决策，避免误删（比如某素材聚合 ROI 低，但可能只是最后一天暴跌，要查明细确认）
-5. 只有当所有信息都够了，才调用写操作（delete_sub_channel / adjust_target / adjust_budget）或输出 finish
+5. 只有当所有信息都够了，才调用 submit_decision 提交你的判断和建议动作
+
+关于权限（重要）：
+- 你在分析阶段**只能读**。没有任何工具能让你直接改动投放配置。
+- 你想做的写操作（删子渠道 / 调预算 / 调目标），只能写进 submit_decision 的 actions 里，
+  作为「建议」提交。这些建议会交给人审核，人确认后才执行。
+- 所以不要假装你已经做了操作，也不要说「已删除」——你只是提出了建议。
 
 工具使用优先级（重要）：
 - 数据能直接判断 → 只用数据工具（get_metric / get_top_history / get_trend_with_ops），不要多余地查经验
@@ -641,17 +713,18 @@ SYSTEM_PROMPT = """你是一个海外 IAA（网赚类）广告投放的资深优
   尤其警惕「同名不同义」——eCPM 分买量（spend/buy_impressions×1000）和变现（ad_revenue/ad_impressions×1000）两套，
   CTR/CVR 也分买量侧和变现侧。拿不准口径就先查，不要按字面猜。
 
-每一步输出格式（严格 JSON，不要输出其他文字）：
-- 想查数据时：
-  {"step": "tool", "name": "get_metric", "parameters": {"obj_type":"creative","obj_id":"crt_002","metric":"d7_roi","days":8}}
-- 想做决策/结束分析时：
-  {"step": "finish", "conclusion": "一句话总结", "reasoning": "你的完整推理链：你看了哪些数据、发现了什么、为什么得出这个结论、为什么不做某些操作", "actions": [{"action":"delete_sub_channel","target":"ch_003","params":{},"reason":"..."}]}
+收尾方式：
+- 分析完必须调用 submit_decision，填清楚 conclusion（一句话结论）、reasoning（完整推理链）、
+  actions（建议动作，没有就传空数组）。
+- 不要用普通文字回复代替 submit_decision，那样你的结论不会被记录。
+- reasoning 里要写清「为什么这么做」以及「为什么不做某些操作」，这是给人看的可解释性说明。
 
-规则：
-- 一次只输出一个 step（一个 tool 调用，或一个 finish）
-- 不要重复查已经查过的数据
-- 没有需要优化的就 finish 且 actions 为空数组
-- finish 时必须在 reasoning 里写清楚「为什么这么做」和「为什么不做某些操作」，这是给人看的可解释性说明
+写动作的约束（submit_decision 里的 actions 会被系统校验，不合规会被拒绝）：
+- 一次最多 5 个动作
+- adjust_budget 的新预算必须在 1 ~ 50000 之间，且单次变动不超过原值的 3 倍
+- adjust_target 的新目标必须在 0.1 ~ 3.0 之间
+- 每个动作都必须写 reason
+- 拿不准要不要动的时候就不动。宁可 actions 为空，也不要为了"有产出"硬凑动作
 """
 
 
@@ -673,91 +746,163 @@ def _make_client():
     return OpenAI(api_key=api_key, base_url=base_url, timeout=60.0, max_retries=2), model
 
 
-def _call_once(client, model, messages) -> str:
-    """单次调用 LLM，返回文本。"""
-    resp = client.chat.completions.create(
-        model=model, messages=messages, temperature=0.2, timeout=60.0,
-    )
-    return resp.choices[0].message.content
+def _call_once(client, model, messages, tools=None):
+    """单次调用 LLM，返回 message 对象。
+
+    和旧版的区别：旧版只取 message.content（字符串），靠 prompt 教模型「输出什么 JSON」；
+    现在把 tools 直接传给模型，模型返回结构化的 tool_calls，我们不需要再解析自由文本。
+
+    这带来三个实际收益：
+      1. 工具清单不再写进 system prompt，每轮省下几千 input token
+         （而且 system prompt 短而稳定，更容易命中 provider 的 prompt cache）
+      2. 参数由 schema 约束，模型不会漏字段、不会把数字写成字符串
+      3. 可以一次返回多个 tool_calls，读操作天然可并行
+    """
+    kwargs = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.2,
+        "timeout": 60.0,
+    }
+    if tools:
+        kwargs["tools"] = tools
+        kwargs["tool_choice"] = "auto"
+    resp = client.chat.completions.create(**kwargs)
+    return resp.choices[0].message
 
 
-def run_llm_loop(snapshot: Dict[str, Any], plat,
+def run_llm_loop(snapshot: Dict[str, Any], plat=None,
                  max_rounds: int = 8) -> Dict[str, Any]:
     """
-    多轮 Function Calling 主循环：LLM 查数据 → 你执行 → 结果回传 → 直到 finish。
+    多轮原生 Function Calling 主循环。
 
-    这是「标准 Function Calling」的完整形态：
-      - LLM 输出 tool 调用 → 查表找到函数 → 执行 → 结果 json.dumps 变文字回传
-      - LLM 读结果，继续查或输出 finish
-      - max_rounds 防止 LLM 无限查下去（死循环）
+    流程：
+        LLM → tool_calls（可能一次多个）→ 逐个执行 → 结果以 role=tool 回传 → 继续
+        LLM → submit_decision → 循环结束，返回决策
+
+    读写分离（关键）：
+        这里能执行的只有 registry 里的 6 个读工具。LLM 就算编造一个
+        delete_sub_channel 的调用，也会因为 registry 里没有而返回 error，
+        **不会落到平台上**。写操作只能走 submit_decision → pending → approve。
+
+    兜底：
+        少数模型/网关不返回 tool_calls，而是把 JSON 写在 content 里。
+        这时走 parse_llm_step 解析文本，保证不因为 provider 差异而整体失败。
+
+    Args:
+        snapshot:   快照 JSON
+        plat:       保留参数，兼容旧调用点（读工具不需要平台实例）
+        max_rounds: 最多几轮，防死循环
 
     Returns:
-        {"conclusion": ..., "actions": [...], "trace": [...]}
-        trace 记录每一轮 LLM 做了什么（调试用）
+        {"conclusion": ..., "reasoning": ..., "actions": [...], "trace": [...]}
     """
     client, model = _make_client()
-    registry = _build_tool_registry(plat)
-
-    system_msg = SYSTEM_PROMPT + "\n\n可用工具清单：\n" + json.dumps(
-        TOOLS_DEFINITION, ensure_ascii=False, indent=2)
+    registry = _build_tool_registry()
+    tools = _openai_tools()
 
     messages = [
-        {"role": "system", "content": system_msg},
+        {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": "这是中台数据快照：\n" +
          json.dumps(snapshot, ensure_ascii=False, default=str)},
     ]
 
-    trace = []
+    trace: List[Dict[str, Any]] = []
+    decision: Optional[Dict[str, Any]] = None
 
-    for round_no in range(max_rounds):
-        llm_text = _call_once(client, model, messages)
-        step = parse_llm_step(llm_text)          # 解析 LLM 这一步想干嘛
+    for round_no in range(1, max_rounds + 1):
+        msg = _call_once(client, model, messages, tools=tools)
+        tool_calls = getattr(msg, "tool_calls", None) or []
 
-        if step.get("step") == "finish":
-            # LLM 说「分析完了」，返回最终决策
-            trace.append({"round": round_no + 1, "step": "finish",
-                          "reasoning": step.get("reasoning", ""),
-                          "raw": llm_text[:300]})
+        # ---------- 情况 A：模型给出了工具调用 ----------
+        if tool_calls:
+            # 先把 assistant 的 tool_calls 原样放回历史，否则下一轮格式不合法
+            messages.append({
+                "role": "assistant",
+                "content": msg.content or "",
+                "tool_calls": [
+                    {"id": tc.id, "type": "function",
+                     "function": {"name": tc.function.name,
+                                  "arguments": tc.function.arguments or "{}"}}
+                    for tc in tool_calls
+                ],
+            })
+
+            for tc in tool_calls:
+                name = tc.function.name
+                try:
+                    args = json.loads(tc.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+
+                # ---- 终态工具：不执行任何写操作，只记录决策 ----
+                if name == "submit_decision":
+                    decision = {
+                        "conclusion": args.get("conclusion", ""),
+                        "reasoning": args.get("reasoning", ""),
+                        "actions": args.get("actions") or [],
+                    }
+                    trace.append({
+                        "round": round_no,
+                        "step": "finish",              # 保留旧字段值，兼容前端/trace 打印
+                        "source": "submit_decision",
+                        "reasoning": decision["reasoning"][:300],
+                        "actions_count": len(decision["actions"]),
+                    })
+                    messages.append({
+                        "role": "tool", "tool_call_id": tc.id,
+                        "content": json.dumps(
+                            {"ok": True,
+                             "message": "决策已记录为待确认建议单，等待人工审核后执行"},
+                            ensure_ascii=False),
+                    })
+                    continue
+
+                # ---- 读工具：查表执行 ----
+                func = registry.get(name)
+                if func is None:
+                    result = {"error": f"工具 {name} 不在分析阶段的可调用清单里"
+                                       f"（写操作只能通过 submit_decision 提交建议）"}
+                else:
+                    try:
+                        result = func(**args)       # 关键：按 name 找到函数，args 原样传入
+                    except Exception as e:
+                        result = {"error": f"{type(e).__name__}: {e}"}
+
+                # 记录「调了什么 + 参数 + 返回了什么」，这是可解释性的客观证据
+                trace.append({"round": round_no, "step": "tool", "name": name,
+                              "parameters": args, "result": result})
+
+                messages.append({
+                    "role": "tool", "tool_call_id": tc.id,
+                    "content": json.dumps(result, ensure_ascii=False, default=str),
+                })
+
+            if decision is not None:
+                return {**decision, "trace": trace}
+            continue
+
+        # ---------- 情况 B：模型没调工具，直接回了文本 ----------
+        text = msg.content or ""
+        fallback = parse_llm_step(text)
+        if fallback.get("step") == "finish":
+            trace.append({"round": round_no, "step": "finish",
+                          "source": "text-fallback",
+                          "reasoning": (fallback.get("reasoning") or "")[:300]})
             return {
-                "conclusion": step.get("conclusion", ""),
-                "reasoning": step.get("reasoning", ""),
-                "actions": step.get("actions", []),
+                "conclusion": fallback.get("conclusion", ""),
+                "reasoning": fallback.get("reasoning", ""),
+                "actions": fallback.get("actions") or [],
                 "trace": trace,
             }
 
-        if step.get("step") == "tool":
-            # LLM 想调工具 → 查表执行 → 结果回传
-            name = step.get("name")
-            params = step.get("parameters", {})
-            func = registry.get(name)
-            if func is None:
-                result = {"error": f"未知工具 {name}"}
-            else:
-                try:
-                    result = func(**params)       # 关键：按 name 找到函数，params 原样传入
-                except Exception as e:
-                    result = {"error": str(e)}
-
-            # 关键：记录「调了什么 + 参数 + 返回了什么」，这是可解释性的客观证据
-            trace.append({"round": round_no + 1, "step": "tool",
-                          "name": name, "parameters": params,
-                          "result": result})
-
-            # 关键步骤：把执行结果变成文字，append 进对话，回传给 LLM
-            messages.append({"role": "assistant", "content": llm_text})
-            messages.append({"role": "user", "content":
-                f"工具 {name} 返回结果：\n" +
-                json.dumps(result, ensure_ascii=False, default=str)})
-            continue
-
-        # 既不是 tool 也不是 finish，让 LLM 重新按格式输出
-        trace.append({"round": round_no + 1, "step": "unknown",
-                      "raw": llm_text[:200]})
-        messages.append({"role": "assistant", "content": llm_text})
+        trace.append({"round": round_no, "step": "no_tool_call",
+                      "raw": text[:200]})
+        messages.append({"role": "assistant", "content": text})
         messages.append({"role": "user", "content":
-            "你的输出不符合格式，请按约定的 JSON 格式重新输出（step 必须是 tool 或 finish）。"})
+            "请调用 submit_decision 提交最终决策（没有要做的动作就传空 actions）。"})
 
-    return {"conclusion": "达到最大轮数仍未 finish", "reasoning": "",
+    return {"conclusion": "达到最大轮数仍未提交决策", "reasoning": "",
             "actions": [], "trace": trace}
 
 
@@ -868,12 +1013,22 @@ def run_agent(dry_run: bool = True, max_rounds: int = 8) -> Dict[str, Any]:
     executed = []
     write_actions = [a for a in decision["actions"]
                      if a.get("action") in VALID_ACTIONS]
+
+    # 批量预检：数量上限 + 同对象去重（第 2 层防线的入口）
+    write_actions, batch_rejected = guardrails.check_batch(write_actions)
+    if batch_rejected:
+        print("\n[护栏] 批量预检拦下 " + str(len(batch_rejected)) + " 条：")
+        for r in batch_rejected:
+            print("  - " + str(r.get("reason")))
+
     if not dry_run and write_actions:
         print("\n[2/2] 执行写动作...")
         for a in write_actions:
-            r = _execute_action(plat, a)
+            r = _execute_action(plat, a)      # 单条执行时再过一遍业务边界
+            r.setdefault("action", a.get("action", ""))   # 看板靠它匹配「哪条已执行」
             executed.append(r)
-            print(f"  - {a['action']} {a.get('target')}: {r.get('message')}")
+            flag = "已拦截" if r.get("blocked_by") else "执行"
+            print(f"  - [{flag}] {a['action']} {a.get('target')}: {r.get('message')}")
     elif dry_run:
         print("\n[2/2] dry_run 模式，跳过执行（仅分析）")
 
@@ -881,18 +1036,59 @@ def run_agent(dry_run: bool = True, max_rounds: int = 8) -> Dict[str, Any]:
         "conclusion": decision["conclusion"],
         "reasoning": decision.get("reasoning", ""),
         "actions": decision["actions"],
+        "batch_rejected": batch_rejected,
         "trace": decision.get("trace", []),
         "executed": executed,
     }
 
 
-def _execute_action(plat, action: Dict[str, Any]) -> Dict[str, Any]:
-    """把解析出的写动作转成平台调用。"""
-    a_type = action["action"]
-    target = action.get("target", "")
-    params = action.get("params", {})
-    reason = action.get("reason", "Agent 自动优化")
+def _get_current_cfg(campaign_id: str, country: str) -> Dict[str, Any]:
+    """
+    取某系列某国家的**当前真实配置**，给护栏算变动幅度用。
 
+    为什么执行时要现查而不是用建议单里记的值：
+        建议单可能是几分钟甚至几小时前生成的，期间人可能已经手动改过，
+        或者另一个 Agent 已经执行了相反的动作。用旧值当基线会导致「幅度校验」失效。
+    """
+    if not campaign_id or not country:
+        return {}
+    try:
+        for c in _list_countries(campaign_id):
+            if c.get("country") == country:
+                return {"budget": c.get("budget"), "target": c.get("target")}
+    except Exception:
+        # 查不到就返回空，护栏会按「无基线」处理（adjust_budget 会拒绝）
+        return {}
+    return {}
+
+
+def _execute_action(plat, action: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    把解析出的写动作转成平台调用。
+
+    **执行前必须先过 guardrails**，这是最后一道路障：
+        LLM 的判断 → 人工确认 → 护栏校验 → 平台执行
+
+    注意顺序：护栏在人工确认之后、平台调用之前。这样即使人点了确认，
+    一个明显错误的动作（预算加个零、目标写成 70 而不是 0.7）仍然会被拦下。
+    """
+    a_type = action.get("action", "")
+    target = action.get("target", "")
+    params = action.get("params") or {}
+    reason = action.get("reason") or "Agent 自动优化"
+
+    # ---- 第 2 层防线：业务边界校验（拿当前真实配置算幅度）----
+    current: Dict[str, Any] = {}
+    if a_type in ("adjust_budget", "adjust_target"):
+        current = _get_current_cfg(target, params.get("country", ""))
+
+    ok, why = guardrails.validate_action(action, current)
+    if not ok:
+        return {"ok": False, "blocked_by": "guardrails",
+                "action": a_type, "target": target,
+                "message": f"护栏拦截：{why}"}
+
+    # ---- 通过校验，才真正打到平台 ----
     if a_type == "delete_sub_channel":
         return plat.delete_sub_channel(target, operator="agent", reason=reason)
     if a_type == "adjust_budget":
@@ -953,11 +1149,19 @@ def approve_agent_run(run_id: int) -> Dict[str, Any]:
     """
     投放人确认一条 pending 建议单，真正执行里面的写动作。
 
+    为什么确认之后还要重新校验（TOCTOU）：
+        建议单从生成到被人点「确认」之间可能隔了很久。这期间配置可能已经变了
+        ——别人手动调过预算、或者另一张建议单已经执行了相反的动作。
+        如果直接按生成时的判断执行，就会出现「基于过期信息做决策」。
+
+        所以这里的顺序是：**先拿当前真实配置重跑一遍护栏，通过的才执行**。
+        护栏拦下的动作会带着原因记进 executed，人能直接看到「为什么没生效」。
+
     Args:
         run_id: 待确认建议单的 ID
 
     Returns:
-        {"ok": True, "run_id": ..., "executed": [...]}
+        {"ok": True, "run_id": ..., "executed": [...], "blocked": [...]}
     """
     import platform_layer
     run = dim_scd.get_agent_run(run_id)
@@ -966,17 +1170,29 @@ def approve_agent_run(run_id: int) -> Dict[str, Any]:
     if run["status"] != "pending":
         return {"ok": False, "message": f"建议单 {run_id} 状态为 {run['status']}，只有 pending 才能确认"}
 
+    # 批量预检：数量上限 + 同对象去重（生成时可能没过，这里再兜一次）
+    actions, batch_rejected = guardrails.check_batch(run["actions"])
+
     plat = platform_layer.get_platform("mock")
     executed = []
-    for a in run["actions"]:
-        r = _execute_action(plat, a)
+    blocked = []
+    for a in actions:
+        r = _execute_action(plat, a)          # 内部会拿当前配置重算幅度
         r["action"] = a.get("action", "")
         executed.append(r)
+        if r.get("blocked_by"):
+            blocked.append({"action": a.get("action"), "target": a.get("target"),
+                            "reason": r.get("message")})
 
-    # 更新状态为 executed
+    blocked.extend([{"action": r.get("action", {}).get("action") if isinstance(r.get("action"), dict) else None,
+                     "target": None, "reason": r.get("reason")}
+                    for r in batch_rejected])
+
+    # 更新状态：全部被拦也算 processed，避免建议单永久卡在 pending
     dim_scd.update_agent_run(run_id, status="executed", executed=executed)
 
-    return {"ok": True, "run_id": run_id, "executed": executed}
+    return {"ok": True, "run_id": run_id, "executed": executed,
+            "blocked": blocked, "blocked_count": len(blocked)}
 
 
 def reject_agent_run(run_id: int) -> Dict[str, Any]:

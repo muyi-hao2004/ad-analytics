@@ -1,5 +1,5 @@
 """
-MCP Server：把 IAA 中台的 8 个工具封装成标准 MCP 工具，供任意 Agent 调用。
+MCP Server：把 IAA 中台的数据能力封装成标准 MCP 工具，供任意 Agent 调用。
 
 背景（2026 标准）：
   之前 agent.py 里的工具是「手写 Function Calling」，只有 agent.py 自己能用。
@@ -12,7 +12,8 @@ MCP Server：把 IAA 中台的 8 个工具封装成标准 MCP 工具，供任意
 设计原则：
   - 复用 agent.py 里已有的工具实现（_tool_get_metric 等），不重写逻辑，
     保证「语义层 / 数仓 / 知识库」只有一份代码、一个口径。
-  - 写工具（delete/adjust）复用 platform_layer 的 mock 平台。
+  - **写操作不暴露成工具**：AI 只能通过 submit_suggestion 提交建议单，
+    由人 approve 后才执行（提议者 ≠ 批准者）。
   - 每个工具都带清晰的 docstring（FastMCP 会把 docstring 转成工具的 description，
     这就是「工具 description 是命门」的落地）。
 
@@ -51,8 +52,6 @@ _get_trend_with_ops = agent._tool_get_trend_with_ops
 _search_knowledge = agent._tool_search_knowledge
 _get_metric_definition = agent._tool_get_metric_definition
 
-# 写操作复用 mock 平台（与 agent.py 一致）
-_plat = platform_layer.get_platform("mock")
 
 
 # ============================================================
@@ -126,38 +125,122 @@ def get_metric_definition(metric: str) -> Dict[str, Any]:
 
 
 # ============================================================
-# 写工具（危险操作，复用 mock 平台）
+# 写操作：不是「工具」，是「建议单」
 # ============================================================
+#
+# 为什么 MCP 侧也改掉了三个写工具
+# ---------------------------------
+# MCP 的意义是「任何 AI 客户端都能接进来」。如果这里直接暴露
+# delete_sub_channel / adjust_budget / adjust_target，等于给所有接入的
+# Agent 开了一个无审批的写接口——它们不在我们的进程里，我们拦不住。
+#
+# 更根本的一条原则：**提议者和批准者不能是同一个主体。**
+# 如果 AI 既能提案又能执行，那「人工确认」就只是个装饰。
+#
+# 所以这里只暴露一个 submit_suggestion：
+#   AI 提交建议 → 落成 pending 建议单 → 人在 Web 界面 approve → 才真正执行
+# AI 能看见自己提过的建议及其状态，但碰不到执行动作。
 
 @mcp.tool()
-def delete_sub_channel(target: str, reason: str = "Agent 自动优化") -> Dict[str, Any]:
-    """删除一个子渠道（标记停用，不可逆）。
+def submit_suggestion(actions: list, reasoning: str = "") -> Dict[str, Any]:
+    """提交优化建议单（**不会直接执行**，必须经过人工确认）。
 
-    前置条件（必须满足才调用）：① D7 ROI 明显低于 70% 目标；② 已确认是「持续差」而非单日暴跌；
-    ③ 已确认近期未删除过。宁可多查一轮，不可误删。
-    target: 要删除的子渠道ID，如 ch_003
+    这是本服务唯一的写入口。想删子渠道、调预算、调目标，都写进 actions 里提交。
+
+    触发场景：你查完数据、形成明确判断后，把建议提交给投放人审核。
+    边界：
+      - 提交不等于执行。返回 run_id 后，需要人工在系统里 approve 才会生效。
+      - 建议会过业务护栏（预算 1~50000、单次变动不超过 3 倍、目标 0.1~3.0、
+        一次最多 5 条），不合规的会被拦下并在返回里说明原因。
+
+    actions 每项格式：
+      {"action": "delete_sub_channel"|"adjust_budget"|"adjust_target",
+       "target": "ch_003" 或 "US_A_01",
+       "params": {"country": "US", "new_budget": 40} 或 {"country": "US", "new_target": 0.65},
+       "reason": "为什么做这个动作，依据了哪些数据"}
+
+    reasoning: 整体推理链，说明你看了什么数据、为什么得出这个判断。
     """
-    return _plat.delete_sub_channel(target, operator="agent", reason=reason)
+    import guardrails
+    import dim_scd
+
+    actions = actions or []
+    if not isinstance(actions, list):
+        return {"ok": False, "message": "actions 必须是数组"}
+
+    # 批量预检：数量上限 + 同对象去重
+    accepted, batch_rejected = guardrails.check_batch(actions)
+
+    # 逐条业务边界校验：拿当前真实配置算变动幅度
+    passed, blocked = [], []
+    for a in accepted:
+        current = {}
+        a_type = a.get("action")
+        target = a.get("target") or ""
+        country = (a.get("params") or {}).get("country", "")
+        if a_type in ("adjust_budget", "adjust_target"):
+            current = agent._get_current_cfg(target, country)
+
+        ok, why = guardrails.validate_action(a, current)
+        if ok:
+            passed.append(a)
+        else:
+            blocked.append({"action": a_type, "target": target, "reason": why})
+
+    # 一条都不合规就明确拒绝，不落空建议单
+    if not passed:
+        return {
+            "ok": False,
+            "message": "没有可提交的建议：全部被护栏拦下或格式不合规",
+            "blocked": blocked,
+            "batch_rejected": batch_rejected,
+        }
+
+    run_id = dim_scd.save_agent_run(
+        status="pending",
+        conclusion=f"MCP 客户端提交了 {len(passed)} 条建议",
+        reasoning=reasoning or "",
+        actions=passed,
+        executed=[],
+        trace=[],
+    )
+
+    return {
+        "ok": True,
+        "run_id": run_id,
+        "message": f"建议单 {run_id} 已创建，等待人工确认后才会执行",
+        "accepted_count": len(passed),
+        "blocked_count": len(blocked) + len(batch_rejected),
+        "blocked": blocked + [{"action": None, "target": None, "reason": r.get("reason")}
+                              for r in batch_rejected],
+        "notice": "注意：你的建议尚未执行。不要向用户声称已经完成操作。",
+    }
 
 
 @mcp.tool()
-def adjust_target(target: str, country: str, new_target: float, reason: str = "Agent 自动优化") -> Dict[str, Any]:
-    """调整某系列某国家的目标值（ROAS%，如 0.7 表示 70%）。
+def list_suggestions(status: str = "pending", limit: int = 10) -> Dict[str, Any]:
+    """查看优化建议单列表及其状态（只读）。
 
-    触发场景：当前目标值不合理（过高误判、过低误删），需要校准。
-    target: 系列ID，如 US_A_01；country: 国家代码，如 US；new_target: 新目标值（小数）
+    触发场景：想知道自己之前提交的建议有没有被人确认执行。
+
+    status: pending=待确认 / executed=已执行 / rejected=已放弃
+    limit: 最多返回几条
     """
-    return _plat.adjust_target(target, country, new_target, operator="agent", reason=reason)
+    import dim_scd
 
+    rows = dim_scd.list_agent_runs(limit=limit, status=status) \
+        if hasattr(dim_scd, "list_agent_runs") else []
 
-@mcp.tool()
-def adjust_budget(target: str, country: str, new_budget: float, reason: str = "Agent 自动优化") -> Dict[str, Any]:
-    """调整某系列某国家的预算（美元）。
-
-    触发场景：表现好（ROI达标且量足）加预算放大，表现差降预算控制损失。
-    target: 系列ID；country: 国家代码；new_budget: 新预算（美元）
-    """
-    return _plat.adjust_budget(target, country, new_budget, operator="agent", reason=reason)
+    return {
+        "status": status,
+        "count": len(rows),
+        "items": [
+            {"run_id": r.get("run_id"), "status": r.get("status"),
+             "conclusion": r.get("conclusion"),
+             "created_at": str(r.get("created_at", ""))}
+            for r in rows
+        ],
+    }
 
 
 # ============================================================
@@ -170,10 +253,12 @@ if __name__ == "__main__":
         print("=== MCP Server 已注册的工具 ===")
         for name in ("get_metric", "get_logs", "get_top_history",
                      "get_trend_with_ops", "search_knowledge",
-                     "get_metric_definition", "delete_sub_channel",
-                     "adjust_target", "adjust_budget"):
+                     "get_metric_definition",
+                     "submit_suggestion", "list_suggestions"):
             print(f"  - {name}")
-        print("\n共 9 个工具（含语义层 get_metric_definition）")
+        print()
+        print("共 8 个工具：6 个只读查询 + 1 个提交建议（不执行）+ 1 个查建议状态")
+        print("写操作不直接暴露——AI 只能提建议，必须经人工 approve。")
         sys.exit(0)
 
     # 默认：stdio transport 启动 MCP Server

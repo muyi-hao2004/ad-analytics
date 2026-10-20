@@ -78,8 +78,14 @@ def main():
 
     print("\n--- LLM 决策过程 ---")
     for t in decision["trace"]:
-        mark = {"tool": "查数据", "finish": "给出决策"}.get(t["step"], t["step"])
-        print(f"  第{t['round']}轮 [{mark}] {t['raw'][:90]}")
+        step = t.get("step")
+        if step == "tool":
+            args = json.dumps(t.get("parameters"), ensure_ascii=False)
+            print(f"  第{t['round']}轮 [查数据] {t.get('name')}({args})")
+        elif step == "finish":
+            print(f"  第{t['round']}轮 [给出决策] {t.get('reasoning', '')[:80]}")
+        else:
+            print(f"  第{t['round']}轮 [{step}]")
     print("--- 结束 ---\n")
 
     print("结论:", decision["conclusion"])

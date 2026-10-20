@@ -3,7 +3,9 @@
 一个面向「海外网赚类 IAA 休闲游戏」的广告变现数据分析中台，核心是一个**「数仓 + Agent 双引擎」**：
 
 - **数仓引擎**：Pandas 四层数仓（ODS→DWD→DWS→ADS），双轴 cohort 事实表，产出日常表 / 素材表 / 子渠道表三张业务视图。
-- **Agent 引擎**：DeepSeek 大模型 + Function Calling，能自主分析指标、给出优化决策，并通过 MCP / FastAPI 执行（删子渠道、调预算、调目标）。
+- **Agent 引擎**：DeepSeek 大模型 + 原生 Function Calling，能自主分析指标、下钻查数、给出优化建议。
+  **读写分离**：Agent 在分析阶段只有读权限，写操作（删渠道 / 调预算 / 调目标）只能作为「建议单」提交，
+  经人工确认 + 护栏校验后才执行。
 
 业务背景：美国 T0 市场，纯广告变现（无内购/订阅），**D7 ROAS 目标 70%**。
 
@@ -14,7 +16,7 @@
 | 层 | 技术 |
 |---|---|
 | 数据处理 / 数仓 | Pandas ≥3.0 · NumPy ≥2.4 · PyArrow（Parquet）· SQLite |
-| Agent / LLM | OpenAI SDK（调 DeepSeek）· Function Calling · python-dotenv |
+| Agent / LLM | OpenAI SDK（调 DeepSeek）· 原生 Function Calling（tools / tool_calls）· python-dotenv |
 | RAG 知识库 | ChromaDB · sentence-transformers · bge-m3（本地嵌入） |
 | 语义层 | PyYAML（`src/metrics.yaml` 声明式指标口径） |
 | 接口 | MCP 2.x（给 AI 的工具接口）· FastAPI + Uvicorn（给人的 Web 接口） |
@@ -60,7 +62,7 @@ iaa-analytics-agent/
 │   ├── knowledge_base.py     # RAG：ChromaDB + bge-m3
 │   ├── semantic_layer.py     # 语义层：读 metrics.yaml
 │   ├── metrics.yaml          # 指标口径定义（12 个指标）
-│   ├── mcp_server.py         # MCP Server：封装 9 个工具
+│   ├── mcp_server.py         # MCP Server：6 读 + 提交建议单（不直接执行写）
 │   ├── app.py                # FastAPI 后端
 │   ├── dim_scd.py            # 缓慢变化维度（SCD Type 2）
 │   ├── platform_layer.py     # 平台操作抽象层
@@ -135,9 +137,12 @@ docker compose up -d   # 启动 Postgres + Airflow，Web UI: http://localhost:80
 
 ---
 
-## Agent 能力（工具注册表）
+## Agent 能力：读写分离的工具集
 
-Agent 通过 Function Calling 可调用 9 个工具（MCP 封装）：
+Agent 通过**原生 Function Calling**（`tools=` 参数 + `tool_calls` 响应）工作，不是靠 prompt 里教模型输出 JSON。
+工具分成两类，**写操作不是工具**：
+
+### 读工具（6 个，Agent 在分析阶段可自由调用）
 
 | 工具 | 作用 |
 |---|---|
@@ -147,9 +152,49 @@ Agent 通过 Function Calling 可调用 9 个工具（MCP 封装）：
 | `get_trend_with_ops` | 趋势 + 操作下钻 |
 | `search_knowledge` | RAG 检索优化经验 |
 | `get_metric_definition` | 查指标口径（语义层） |
-| `delete_sub_channel` | 删子渠道 |
-| `adjust_target` | 调目标值 |
-| `adjust_budget` | 调预算 |
+
+### 终态工具（1 个，唯一的写意图出口）
+
+| 工具 | 作用 |
+|---|---|
+| `submit_decision` | 提交最终决策（结论 + 推理链 + **建议动作**）。调用它**不执行**任何写操作 |
+
+### 写操作（不是工具，走建议单流程）
+
+`delete_sub_channel` / `adjust_budget` / `adjust_target` **故意不注册进工具表**。
+原因：如果 LLM 能在分析循环里直接调用它们，它查完数据顺手调一下，平台就真的改了，
+「人工确认」形同虚设。所以：
+
+```
+LLM 分析（只读）→ submit_decision 提交建议 → 落 pending 建议单
+                                              ↓
+                                    人 approve（Web 界面）
+                                              ↓
+                                    guardrails 二次校验
+                                              ↓
+                                       平台执行
+```
+
+MCP Server 侧同样如此：对外只暴露 `submit_suggestion`（提交建议单）和 `list_suggestions`（查状态），
+不暴露任何直接执行的写接口。**提议者和批准者不能是同一个主体。**
+
+### 护栏（`src/guardrails.py`）
+
+执行前的确定性校验，纯函数、可单测、fail-closed：
+
+| 规则 | 阈值 |
+|---|---|
+| 单系列单国家日预算 | 1 ~ 50,000 USD |
+| 单次预算变动幅度 | 原值的 1/3 ~ 3 倍 |
+| ROAS 目标区间 | 0.1 ~ 3.0 |
+| 单次决策动作数 | ≤ 5 |
+| 同对象重复动作 | 后者覆盖前者 |
+| 必填 `reason` | 所有写操作 |
+| 对象 ID 形态 | `^[A-Za-z0-9_-]+$`（拦幻觉 ID） |
+
+**为什么 approve 之后还要再校验一次**：建议单从生成到被点确认之间可能隔了几小时，
+期间配置可能已经变了。直接按生成时的判断执行，就是基于过期信息做决策（TOCTOU 问题）。
+所以 `approve_agent_run` 会拿**当前真实配置**重跑一遍护栏，拦下的动作带原因返回。
 
 ---
 

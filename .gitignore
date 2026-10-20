@@ -91,3 +91,10 @@ docs/project_summary_for_cv.md
 
 # Docker
 docker-compose.override.yml
+
+# 个人文件（简历等）不进仓库
+*简历*.docx
+*简历*.pdf
+
+# 临时文件
+/query
