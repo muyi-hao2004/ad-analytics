@@ -1,5 +1,8 @@
 # IAA 广告变现分析中台（iaa-analytics-agent）
 
+> **这是工程化参考实现，不是生产系统。** 业务数据为合成，策略知识为通用知识。
+> 哪些是真的、哪些是壳，见 [`LIMITATIONS.md`](LIMITATIONS.md)。
+
 一个面向「海外网赚类 IAA 休闲游戏」的广告变现数据分析中台，核心是一个**「数仓 + Agent 双引擎」**：
 
 - **数仓引擎**：Pandas 四层数仓（ODS→DWD→DWS→ADS），双轴 cohort 事实表，产出日常表 / 素材表 / 子渠道表三张业务视图。
@@ -362,3 +365,5 @@ precision  对象错 0 / 方向错 0
 - `src/metrics.yaml` — 语义层指标口径
 - `tests/` — 单测：护栏边界 / 读写分离 / 成本计量。跑法 `pytest tests/ -q`
 - `eval/README.md` — 决策能力评测的方法论、场景库与已知架构限制
+- **[`LIMITATIONS.md`](LIMITATIONS.md)** — 能力边界与已知限制。**先读这份再判断可信度**：
+  哪些是合成数据、哪些是架构欠账、这套评测能证明什么、不能证明什么
