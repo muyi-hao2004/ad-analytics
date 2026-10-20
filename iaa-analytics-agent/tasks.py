@@ -20,6 +20,7 @@ Windows。写一个 Makefile 的结果是「README 里有命令、本机跑不�
     python tasks.py test           # 跑单测（不联网、不调 LLM）
     python tasks.py demo           # 跑多轮 Agent 演示（需 LLM 凭据）
     python tasks.py eval           # 跑决策评测（需 LLM 凭据）
+    python tasks.py retrieval      # 跑 RAG 检索评测（不花钱，需已建知识库）
     python tasks.py cost           # 看运行成本报表
     python tasks.py all            # check → init → test（不含需要 LLM 的环节）
 
@@ -126,6 +127,19 @@ def task_eval(repeat: int = 1, only: str | None = None) -> None:
     _run(cmd, desc=f"决策评测（每场景 {repeat} 次）")
 
 
+def task_retrieval(mode: str = "hybrid") -> None:
+    """跑 RAG 检索评测（recall@k / MRR）。
+
+    不调用 LLM，只依赖本地向量库与嵌入模型。
+    改知识库文档或分块参数后应该重跑一次，对比 recall 有没有退化。
+
+    Args:
+        mode: hybrid（默认，与生产一致）或 vector（仅对比用）
+    """
+    _run([sys.executable, "eval/run_retrieval_eval.py", "--mode", mode],
+         desc=f"RAG 检索评测（{mode}）")
+
+
 def task_cost() -> None:
     """打印运行成本报表。"""
     _run([sys.executable, "cost_report.py"], cwd=SRC, desc="成本报表")
@@ -152,6 +166,9 @@ def main() -> None:
     sub.add_parser("test", help="跑单测")
     sub.add_parser("demo", help="多轮 Agent 演示（需 LLM）")
     sub.add_parser("cost", help="成本报表")
+    p_ret = sub.add_parser("retrieval", help="RAG 检索评测（不花钱）")
+    p_ret.add_argument("--mode", choices=["hybrid", "vector"], default="hybrid",
+                       help="检索方式，默认 hybrid（与生产一致）")
     sub.add_parser("all", help="check + init + test")
 
     p_eval = sub.add_parser("eval", help="决策评测（需 LLM）")
@@ -164,6 +181,8 @@ def main() -> None:
 
     if args.task == "eval":
         task_eval(repeat=args.repeat, only=args.only)
+    elif args.task == "retrieval":
+        task_retrieval(mode=args.mode)
     else:
         {"check": task_check, "init": task_init, "test": task_test,
          "demo": task_demo, "cost": task_cost, "all": task_all}[args.task]()

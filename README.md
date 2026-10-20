@@ -1,7 +1,8 @@
 # IAA 广告变现分析中台（IAA Monetization Analytics Platform）
 
 > **定位：学习型项目 + Agent 工程化参考实现，不是生产系统。**
-> 业务数据为合成，RAG 语料为通用方法论。哪些是真的、哪些是壳，见
+> 业务数据为合成；RAG 语料来自公开行业报告与平台文档（每条带来源与时间），非第一方数据。
+> 哪些是真的、哪些是壳，见
 > **[`iaa-analytics-agent/LIMITATIONS.md`](iaa-analytics-agent/LIMITATIONS.md)**。
 >
 > 这个仓库要展示的不是"我做过投放优化业务"，而是：
@@ -43,7 +44,7 @@
 | **读写分离** | 分析阶段只有 **6 个只读工具**；写操作**不是工具**，只能通过 `submit_decision` 提交建议单 |
 | **提案 / 批准分离** | 建议单落 `pending` → 人在 Web 界面 approve → 护栏二次校验 → 才执行。**提议者和批准者不能是同一主体** |
 | **写操作护栏** | 纯函数、fail-closed：预算 1~50000、单次变动 1/3~3 倍、目标 0.1~3.0、动作数 ≤5、ID 形态正则、强制 reason |
-| **RAG 检索链路** | ChromaDB + bge-m3 中文嵌入，语料 2 篇通用优化方法论。**价值在演示检索链路（分块/嵌入/相似度检索），不在语料规模** |
+| **RAG 检索链路 + 检索评测** | 9 篇行业知识（68 块）：ROAS 数学模型、留存基准、Unity/LevelPlay 与 Mintegral 投放机制、eCPM 地区分层、假量识别、口径冲突。ChromaDB + bge-m3，**混合检索（向量 + TF-IDF + RRF 融合）**。检索评测 recall@3 **100%**（20 条用例），`python tasks.py retrieval` |
 
 ### 工程侧（这部分才是最值得看的）
 
@@ -75,6 +76,14 @@ python eval/run_eval.py --repeat 3
    单跑一次会显示 PASS。**单次通过率 66.7% 的 Agent，pass³ ≈ 29.6%**，业务上仍不能上线。
 3. **LLM 会稳定犯同一个错**，靠 prompt 提醒不可靠 → 这是「Agent 为什么需要 guardrails」
    的实测依据，不是防御理论。
+
+### 检索评测（知识库，20 条用例）
+
+```
+hit@1     85%      recall@3   100%     MRR  0.900
+```
+
+四次迭代的完整对比见 [`eval/README.md`](iaa-analytics-agent/eval/README.md)。其中两个反直觉结果：**给 chunk 补标题反而从 85% 降到 80%**（同文档块互相霸榜）；**每次检索重建 ChromaDB client 慢 10 倍以上**（等于每次重新加载 2.2GB 嵌入模型）。
 
 **评测还顺带发现一个架构问题**（`adjust_budget` 作用于「系列+国家」，而快照只有
 「素材/子渠道」维度，无映射字段），已在 eval 中标为 `known_gap`，不计入指标。
@@ -234,7 +243,7 @@ cd src && python app.py                            # FastAPI
 | 调度 | Apache Airflow（Docker + Postgres + LocalExecutor） |
 | Agent | OpenAI SDK（调 DeepSeek）、原生 Function Calling、工具注册表 |
 | Agent 安全 | 读写分离、建议单审批、确定性护栏（fail-closed）、TOCTOU 二次校验 |
-| RAG | ChromaDB、bge-m3（sentence-transformers）、语义检索 |
+| RAG | ChromaDB、bge-m3（sentence-transformers）、向量+TF-IDF 混合检索、RRF 融合 |
 | 评测 | 自建 golden set（8 场景）、programmatic scorer、三层指标、pass^k |
 | 后端 | FastAPI、平台抽象层、Playwright |
 | 测试 | pytest（49 个，含 FakeClient 模拟 tool_calls） |
