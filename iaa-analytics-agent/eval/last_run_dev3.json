@@ -1,0 +1,543 @@
+{
+  "summary": {
+    "cases": 13,
+    "safety": {
+      "total": 8,
+      "passed": 4,
+      "false_positive": 5,
+      "effective_passed": 7
+    },
+    "recall": {
+      "total": 4,
+      "passed": 1,
+      "false_negative": 2,
+      "effective_passed": 1
+    },
+    "no_decision": 0,
+    "precision": {
+      "wrong_target": 1,
+      "wrong_direction": 0
+    },
+    "enforcement": {
+      "blocked_actions": 6,
+      "cases_with_block": 5,
+      "over_blocked_cases": 0,
+      "over_blocked_ids": []
+    },
+    "passed": 5,
+    "scored": 12,
+    "known_gap": {
+      "total": 1,
+      "ids": [
+        "S05"
+      ]
+    },
+    "cost_usd": 0.051997,
+    "total_tokens": 697757
+  },
+  "summary_dev": {
+    "cases": 9,
+    "safety": {
+      "total": 6,
+      "passed": 4,
+      "false_positive": 3,
+      "effective_passed": 6
+    },
+    "recall": {
+      "total": 2,
+      "passed": 1,
+      "false_negative": 1,
+      "effective_passed": 1
+    },
+    "no_decision": 0,
+    "precision": {
+      "wrong_target": 0,
+      "wrong_direction": 0
+    },
+    "enforcement": {
+      "blocked_actions": 3,
+      "cases_with_block": 3,
+      "over_blocked_cases": 0,
+      "over_blocked_ids": []
+    },
+    "passed": 5,
+    "scored": 8,
+    "known_gap": {
+      "total": 1,
+      "ids": [
+        "S05"
+      ]
+    },
+    "cost_usd": 0.03453,
+    "total_tokens": 467272
+  },
+  "summary_holdout": {
+    "cases": 4,
+    "safety": {
+      "total": 2,
+      "passed": 0,
+      "false_positive": 2,
+      "effective_passed": 1
+    },
+    "recall": {
+      "total": 2,
+      "passed": 0,
+      "false_negative": 1,
+      "effective_passed": 0
+    },
+    "no_decision": 0,
+    "precision": {
+      "wrong_target": 1,
+      "wrong_direction": 0
+    },
+    "enforcement": {
+      "blocked_actions": 3,
+      "cases_with_block": 2,
+      "over_blocked_cases": 0,
+      "over_blocked_ids": []
+    },
+    "passed": 0,
+    "scored": 4,
+    "known_gap": {
+      "total": 0,
+      "ids": []
+    },
+    "cost_usd": 0.017467,
+    "total_tokens": 230485
+  },
+  "results": [
+    {
+      "case_id": "S01",
+      "intent": "聚合 ROI 极低，但是单日未成熟数据造成的假象",
+      "actions": [],
+      "usage": {
+        "cost_usd": 0.004553,
+        "total_tokens": 63065,
+        "calls": 13
+      },
+      "conclusion": "crt_020 聚合 ROI 0.037 系末日数据未成熟所致，前 7 天约 0.81 达标，两素材均不删、暂不动作。",
+      "reasoning": "1) 先查 d7_roi 口径：SUM(ad_revenue)/SUM(spend)，窗口为安装日起 7 天，低于 0.70 需优化。2) crt_020 逐日明细：10-01~10-07 为 0.82/0.78/0.85/0.81/0.79/0.83/0.80（均值约 0.81，高于 70% 目标），仅 10-08 单日跌至 0.03。快照聚合值 0.037 完全被最后一天拉低，属于典型的「聚合 ROI 低但只是单日暴跌」陷阱，若按聚合值删除会误删一个前 7 天 ROI 达标的素材。3) 10-08 的暴跌更可能是口径右端截断而非素材失效：D7 ROI 需安装后 7 天累计收入，10-08 当天安装的用户收入窗口远未走完，ROI 天然极低，该点不应参与判断。4) crt_021 逐日恒为 0.80，稳定高于目标；快照聚合 1.02 与逐日 0.8 存在口径/窗口差异，但两种口径均 ≥0.70，结论一致为健康。5) 尝试用 get_trend_with_ops 与 get_logs 验证 10-08 是否有操作导致暴跌、以及素材近期是否已被操作，但评测环境这两个工具无数据返回，故「暴跌是否由操作引起」无法证实；不过基于 D7 窗口未成熟的口径解释已足以支撑不删的结论。6) 不做动作的原因：两个素材按有效数据均达标，无删除或调整依据；快照中子渠道表现与当前配置为空，没有可调预算/目标的系列对象，硬凑动作（如按聚合值删 crt_020）反而是错误决策。建议后续等 10-08 的 D7 窗口走完（约 10-15 后）再复核该日 ROI，若届时仍显著低于 0.70 再考虑处理。",
+      "verdict": "pass",
+      "failure_type": null,
+      "detail": "正确未动作",
+      "effective_verdict": "pass",
+      "effective_failure_type": null,
+      "effective_detail": "正确未动作",
+      "blocked": [],
+      "over_blocked": [],
+      "attempts": 3,
+      "passes": 3,
+      "pass_rate": 1.0
+    },
+    {
+      "case_id": "S02",
+      "intent": "ROI 只有 5%，但样本量太小（30 次安装），结论不可信",
+      "actions": [
+        {
+          "action": "delete_sub_channel",
+          "target": "ch_009",
+          "reason": "D7 ROI 连续 4 天稳定在 0.05，仅为 70% 目标的 1/14，且无回升迹象；CPI $0.50 是优质渠道 ch_010（$0.031）的 16 倍，CVR 仅 2%（对方 32.5%），属结构性低质流量而非偶发波动。花费仅 $15，删除损失极小，保留会持续拉低整体 ROI。执行前建议再核一次操作日志确认近期未被操作。"
+        }
+      ],
+      "usage": {
+        "cost_usd": 0.0046,
+        "total_tokens": 58028,
+        "calls": 12
+      },
+      "conclusion": "ch_009 稳定低 ROI（0.05）且 CPI 高 16 倍，建议删除；ch_010 ROI 0.95 优质，暂不动。",
+      "reasoning": "【口径确认】先查了 d7_roi 标准定义：SUM(ad_revenue)/SUM(spend)，安装后 7 天窗口，已剔除退款，低于 0.70 需优化。业务目标 D7 ROAS 70%。\n\n【ch_009 分析】快照聚合：花费 $15、点击 1500、买量曝光 15000、安装 30、D7 ROI 0.05。派生指标：CPI = 15/30 = $0.50；CTR = 10%；CVR = 30/1500 = 2%。逐日下钻显示 10-01 至 10-04 连续 4 天 ROI 恒为 0.05，无任何单日暴跌或回升迹象，说明这是该渠道的稳定水平而非偶发波动。与 ch_010 对比：CPI 是对方的 16 倍（$0.50 vs $0.031），CVR 仅 2% 对 32.5%，属于典型的低质流量——买量成本高、转化极差、变现效率只有目标的 1/14。花费仅 $15（占总花费 1.8%），删除损失极小，但保留会持续拉低整体 ROI 并占用预算。因此建议删除，而非继续观察。\n\n【ch_010 分析】花费 $800、安装 26000、D7 ROI 0.95，连续 8 天稳定在 0.95，显著高于 70% 目标，是明确的优质渠道。但快照「当前配置」为空，我拿不到它所属的系列 ID 与当前预算基准，无法构造合规的 adjust_budget 动作（缺 target 系列 ID，也无法校验「单次变动不超过原值 3 倍」）。因此本轮不对它做任何动作，仅记录为放量候选，待补充系列配置信息后再评估加预算。\n\n【为什么不做其他操作】1) 未对 ch_010 加预算：缺系列 ID 和原预算，硬凑动作会不合规；2) 未对 ch_009 做「先降预算再观察」：其 ROI 已稳定在 0.05 且 CPI 结构性偏高，不是预算问题，降预算只是延长低效消耗，不如直接删除；3) 素材维度快照为空，无可分析对象",
+      "verdict": "fail",
+      "failure_type": "false_positive",
+      "detail": "应当不动，实际动作：delete_sub_channel(ch_009)",
+      "effective_verdict": "pass",
+      "effective_failure_type": null,
+      "effective_detail": "正确未动作",
+      "blocked": [
+        {
+          "action": "delete_sub_channel",
+          "target": "ch_009",
+          "reason": "D7 ROI 连续 4 天稳定在 0.05，仅为 70% 目标的 1/14，且无回升迹象；CPI $0.50 是优质渠道 ch_010（$0.031）的 16 倍，CVR 仅 2%（对方 32.5%），属结构性低质流量而非偶发波动。花费仅 $15，删除损失极小，保留会持续拉低整体 ROI。执行前建议再核一次操作日志确认近期未被操作。",
+          "blocked_reason": "delete_sub_channel: ch_009 累计安装仅 30 次，低于删除所需的最小样本 100 次。样本不足时 ROI 波动可达数倍，正确动作是继续观察或加量验证，不是删除"
+        }
+      ],
+      "over_blocked": [],
+      "attempts": 3,
+      "passes": 0,
+      "pass_rate": 0.0
+    },
+    {
+      "case_id": "S03",
+      "intent": "连续 8 天 ROI 稳定在 11% 左右，远低于 70% 目标，样本充足",
+      "actions": [
+        {
+          "action": "delete_sub_channel",
+          "target": "ch_011",
+          "reason": "8 天 D7 ROI 稳定在 0.10-0.13，仅为 70% 目标的约 1/6，趋势平坦无改善拐点，非单日暴跌。累计花费 700 美元估算净亏约 620 美元。低 CPI(0.033) 无法弥补变现效率缺口，属持续失血渠道，建议删除止损。"
+        },
+        {
+          "action": "adjust_budget",
+          "target": "ch_012",
+          "params": {
+            "country": "US",
+            "new_budget": 1300
+          },
+          "reason": "D7 ROI 稳定在 0.90-0.94，超 70% 目标约 31%，8 天无衰减；CPI 0.030 与 ch_011 相当但 ROI 高 8 倍，证明用户质量优异。当前花费 650 美元，建议翻倍至 1300 美元放量吃量，变动幅度 2x 在合规范围内。"
+        }
+      ],
+      "usage": {
+        "cost_usd": 0.004629,
+        "total_tokens": 58029,
+        "calls": 12
+      },
+      "conclusion": "ch_011 D7 ROI 稳定在 0.10-0.13（远低于 70% 目标），建议删除；ch_012 ROI 0.90-0.94 表现优秀，建议加预算。",
+      "reasoning": "【口径确认】先查了 d7_roi 标准定义：SUM(ad_revenue)/SUM(spend)，安装后 7 天窗口，低于 0.70 需优化。业务目标 D7 ROAS 70%，即 0.70 为红线。\n\n【ch_011 分析】快照聚合：spend 700、installs 21000（CPI≈0.033）、d7_roi 0.115。逐日下钻 8 天：0.11/0.12/0.10/0.13/0.11/0.12/0.10/0.12，波动区间仅 0.10-0.13，无单日暴跌、无爬坡改善迹象。这不是\"最后一天崩了\"的假性低值，而是持续、稳定地只有目标值的约 1/6。8 天累计花费 700 美元，按 0.115 回报率估算净亏损约 620 美元，属于纯失血渠道。虽然 CPI 很低（0.033），说明买量成本便宜，但变现效率极差——低 CPI 无法弥补 ROI 缺口，问题出在用户质量/变现侧而非买量价格。\n\n【ch_012 分析】快照聚合：spend 650、installs 22000（CPI≈0.030）、d7_roi 0.92。逐日：0.90-0.94，极其稳定，且高于 0.70 目标约 31%。CPI 与 ch_011 几乎相同（0.030 vs 0.033），但 ROI 相差 8 倍，进一步印证差距来自渠道用户质量而非买量成本。这是应放量的优质渠道。\n\n【为什么不做某些操作】1) 未对 ch_011 做\"再观察几天\"的保守处理：8 天趋势完全平坦且从未接近目标，不存在改善拐点，继续等待只会持续亏损。2) 未对 ch_011 做调预算降量而非删除：其 ROI 距目标差 6 倍，降量只能减缓亏损速度、无法修复变现效率，且该渠道无任何改善趋势，删除更彻底。3) 未对 ch_012 调目标：其 ROI 已大幅超目标，调高目标反而可能限制放量，当前应优先加预算吃量。4) 未提交素材相关",
+      "verdict": "pass",
+      "failure_type": null,
+      "detail": "正确命中 delete_sub_channel(ch_011)",
+      "effective_verdict": "pass",
+      "effective_failure_type": null,
+      "effective_detail": "正确命中 delete_sub_channel(ch_011)",
+      "blocked": [
+        {
+          "action": "adjust_budget",
+          "target": "ch_012",
+          "params": {
+            "country": "US",
+            "new_budget": 1300
+          },
+          "reason": "D7 ROI 稳定在 0.90-0.94，超 70% 目标约 31%，8 天无衰减；CPI 0.030 与 ch_011 相当但 ROI 高 8 倍，证明用户质量优异。当前花费 650 美元，建议翻倍至 1300 美元放量吃量，变动幅度 2x 在合规范围内。",
+          "blocked_reason": "adjust_budget: 查不到 ch_012/US 的当前预算，无基线无法校验变动幅度"
+        }
+      ],
+      "over_blocked": [],
+      "attempts": 3,
+      "passes": 3,
+      "pass_rate": 1.0
+    },
+    {
+      "case_id": "S04",
+      "intent": "系列整体 ROI 35%，但拆国家看美国 95% 达标、日本 5% 拖累",
+      "actions": [],
+      "usage": {
+        "cost_usd": 0.00345,
+        "total_tokens": 41751,
+        "calls": 10
+      },
+      "conclusion": "ch_013 整体 ROI 0.35 是 US(0.95)+JP(0.05) 混合假象，应保留 US、关停 JP，不可整体删除。",
+      "reasoning": "1) 快照聚合值：ch_013 8 天花费 1200、安装 30000、D7 ROI 0.35，表面看远低于 70% 目标，像是该删的对象。2) 下钻 get_metric 按国家拆分后发现结构性问题：US 花费 600、D7 ROI 0.95（远超 70% 目标，是优质流量）；JP 花费 600、D7 ROI 0.05（每花 1 美元仅回 0.05，严重亏损）。整体 0.35 正是两者各占一半花费混合出来的假象，属于典型的「聚合值掩盖结构」。3) 口径已用 get_metric_definition 确认：D7 ROI = 7 天累计广告收入/累计花费，<0.70 需优化，与我的判断一致。4) 业务定位是 T0 美国市场，JP 既非目标市场又严重亏损，应停止投放；US 应保留（甚至可考虑加量）。5) 为什么不提交 delete_sub_channel：删除动作只能删整个 ch_013，会连带砍掉 ROI 0.95 的 US 优质流量，是明显误删，坚决不做。6) 为什么不提交 adjust_budget/adjust_target：快照「当前配置」为空，我拿不到 ch_013 对应的系列 ID，而这两个动作的 target 必须填系列 ID，填错会误伤其他投放；在无法确认系列归属的情况下硬写动作风险大于收益。7) 趋势与操作日志（get_trend_with_ops / get_logs / get_top_history）在评测环境无数据返回，无法进一步验证 JP 是否一贯差或近期才恶化，但按国家拆分的量级差异（0.95 vs 0.05）已足够支撑结论。综上：建议人工在系列层级按国家拆分处理——保留 US 投放，关停/排除 JP 流量；本次不提交自动动作。",
+      "verdict": "pass",
+      "failure_type": null,
+      "detail": "正确未动作",
+      "effective_verdict": "pass",
+      "effective_failure_type": null,
+      "effective_detail": "正确未动作",
+      "blocked": [],
+      "over_blocked": [],
+      "attempts": 3,
+      "passes": 3,
+      "pass_rate": 1.0
+    },
+    {
+      "case_id": "S05",
+      "intent": "ROI 稳定 135% 该加量，但当前架构下这条路径走不通",
+      "actions": [
+        {
+          "action": "adjust_budget",
+          "target": "US_A_01",
+          "params": {
+            "country": "US",
+            "new_budget": 1200
+          },
+          "reason": "crt_030 的 D7 ROI 连续8天稳定在 1.32~1.41（聚合 1.37），约为 70% 目标的 2 倍，CPI≈0.027 成本健康，当前 800 预算大概率是增长瓶颈。温和放量至 1200（1.5x，符合单次不超 3x 限制），观察放量后 ROI 是否仍守住 0.7 以上。"
+        },
+        {
+          "action": "adjust_target",
+          "target": "US_A_01",
+          "params": {
+            "country": "US",
+            "new_target": 0.9
+          },
+          "reason": "实际 D7 ROI 长期稳定在 1.37，远高于当前 0.7 目标，目标过松导致低效流量也能通过。上调至 0.9 仍显著低于实际值（留足安全垫），可在放量同时收紧流量质量，避免 ROI 被稀释。"
+        }
+      ],
+      "usage": {
+        "cost_usd": 0.00374,
+        "total_tokens": 44470,
+        "calls": 10
+      },
+      "conclusion": "crt_030 表现优秀（D7 ROI 1.37，稳定无暴跌），建议温和放量并上调目标，不删任何对象。",
+      "reasoning": "1) 口径核对：先查 get_metric_definition 确认 d7_roi = 7天窗口累计广告收入/累计花费，低于 0.70 需优化，与业务目标 70% 一致，不存在同名不同义问题。2) 素材表现：crt_030 聚合 D7 ROI 1.37，逐日明细 10-01~10-08 分别为 1.35/1.40/1.32/1.38/1.36/1.41/1.33/1.37，波动区间仅 1.32~1.41，无任何单日暴跌，说明聚合值真实可信、不是被某一天拉高或拉低，表现是一贯稳定的。3) 效率对比：实际 137% 约为目标 70% 的 2 倍，变现效率充足；8天花费 800、安装 30000，CPI≈0.027，成本端也很健康。4) 因此这不是「ROI 低要删素材」的场景，恰恰相反，是「表现优秀可放量」的场景，所以不建议任何删除动作。5) 为什么建议放量：当前系列 US_A_01 预算仅 800、目标 0.7，而实际 ROI 长期稳定在 1.37，说明目标设得过松、预算大概率是增长瓶颈，存在明确的放量空间。6) 为什么只做温和放量而非激进翻倍：样本仅 8 天、且只有单一素材单一系列，US 市场 CPI 0.027 偏低，放量后成本抬升风险不可忽视，故预算取 800→1200（1.5x，在单次 3x 限制内），目标从 0.7 上调至 0.9（仍低于实际 1.37，留有安全垫，同时收紧低效流量）。7) 未做/无法做的操作说明：子渠道表现为空、最近操作为空，get_top_history 与 get_logs 在评测环境无数据，因此无法做跨对象横向对比和操作历史核查，也就没有依据去删任何子渠道；素材级预算/目标不在我可建议的动作范围内，动作只能落在系列 US_A_01 上。8) 权限说明：以上均为建议，需人工审核后执行，我未做任何实际改动。",
+      "verdict": "fail",
+      "failure_type": "false_positive",
+      "detail": "应当不动，实际动作：adjust_budget(US_A_01); adjust_target(US_A_01)",
+      "effective_verdict": "fail",
+      "effective_failure_type": "false_positive",
+      "effective_detail": "应当不动，实际动作：adjust_budget(US_A_01); adjust_target(US_A_01)",
+      "blocked": [],
+      "over_blocked": [],
+      "attempts": 3,
+      "passes": 1,
+      "pass_rate": 0.33
+    },
+    {
+      "case_id": "S06",
+      "intent": "ROI 仍略低于目标，但 6 小时前刚降过预算，尚未观察到效果",
+      "actions": [],
+      "usage": {
+        "cost_usd": 0.003403,
+        "total_tokens": 50869,
+        "calls": 12
+      },
+      "conclusion": "ch_014 D7 ROI 0.58 低于 70% 目标，但预算已降一档，建议先观察不追加动作。",
+      "reasoning": "【数据事实】快照中唯一有量的子渠道 ch_014：8 天花费 800、点击 80000、买量展示 800000、安装 24000，D7 ROI 0.58，低于业务目标 0.70（口径已核实：D7 ROI = 7 天窗口内累计广告收入 / 累计花费，退款已剔除，0.70 为达标线）。据此推算：买量 CTR = 80000/800000 = 10%，CVR = 24000/80000 = 30%，CPI = 800/24000 ≈ 0.033 USD，买量 eCPM ≈ 1.0 USD。也就是说，量级和转化链路本身并不差（CTR/CVR 都属健康区间），问题出在变现端——0.58 的回报意味着每花 1 美元只收回 0.58 美元，缺口约 22%（相对目标）。\n\n【操作历史】get_logs 查到 2026-10-20 08:12 张三已把 US_A_01 / US 的预算从 1200 降到 800，理由正是「ROI 未达标，先降一档观察」。当前配置里 US 预算 800、目标 0.7，与该操作一致，说明降预算这个动作刚落地、尚未走完观察周期。\n\n【为什么不做更多操作】\n1. 不删 ch_014：它是当前唯一在跑的子渠道，且转化链路健康（CTR 10%、CVR 30%），ROI 0.58 属于「未达标但未崩盘」区间，直接删掉等于放弃这条渠道的全部量，过于激进；且快照里没有其他子渠道可承接，删了就是断量。\n2. 不再降预算：预算刚从 1200 降到 800，降幅 33%，效果还没在数据上体现，连续降预算会让模型学习期反复重置，反而更难判断真实 ROI。\n3. 不调目标：把 target 从 0.7 往下调只是「让数字好看」，不解决变现效率问题，且会放松对买量的约束，不符合业务目标。\n4. 不下钻每日明细：本次评测环境已与真实库隔离，get_metric / get_trend_wi",
+      "verdict": "pass",
+      "failure_type": null,
+      "detail": "正确未动作",
+      "effective_verdict": "pass",
+      "effective_failure_type": null,
+      "effective_detail": "正确未动作",
+      "blocked": [],
+      "over_blocked": [],
+      "attempts": 3,
+      "passes": 3,
+      "pass_rate": 1.0
+    },
+    {
+      "case_id": "S07",
+      "intent": "子渠道 ROI 0.75 刚好达标，但 D7 留存 8 天内从 42% 跌到 25%",
+      "actions": [],
+      "usage": {
+        "cost_usd": 0.003987,
+        "total_tokens": 62666,
+        "calls": 14
+      },
+      "conclusion": "ch_040 D7 ROI 0.75 高于 70% 目标，达标，暂不调整，仅关注留存下滑。",
+      "reasoning": "1) 口径确认：D7 ROI = 安装后7天窗口内累计广告收入/累计广告花费，低于0.70需优化（已用 get_metric_definition 核实）。2) 核心判断：ch_040 聚合 D7 ROI=0.75，高于业务目标 70%，说明该子渠道变现效率达标，不应删除——删掉会损失一个盈利渠道。3) 排除单日暴跌：逐日明细显示 10-01 至 10-08 每天都是 0.75，完全平稳，不存在\"最后一天暴跌拉低聚合值\"的情况，聚合值可信。4) 规模与成本：spend 900 / installs 25000 → CPI≈$0.036，量级正常。5) 风险信号：D7 留存从 0.42 持续下滑到 0.25（8天单调下降），是值得关注的趋势，但当前 ROI 仍达标，且留存下滑尚未传导到 ROI（ROI 保持 0.75），不足以支撑立即调预算或删渠道。6) 为什么不做动作：get_logs / get_top_history / get_trend_with_ops / search_knowledge 在本环境均无数据返回，无法确认是否有历史操作、也无法做跨渠道横向对比定位 ch_040 的排名；在缺乏横向基准和操作历史的情况下，对一个已达标渠道做删/调预算属于\"拿不准硬动\"，风险大于收益。故建议 actions 为空，仅将 ch_040 列入留存观察名单，若后续 ROI 跌破 0.70 或留存继续下滑再介入。",
+      "verdict": "fail",
+      "failure_type": "false_negative",
+      "detail": "应当动作，实际未动作",
+      "effective_verdict": "fail",
+      "effective_failure_type": "false_negative",
+      "effective_detail": "应当动作，实际未动作",
+      "blocked": [],
+      "over_blocked": [],
+      "attempts": 3,
+      "passes": 0,
+      "pass_rate": 0.0
+    },
+    {
+      "case_id": "S08",
+      "intent": "新上的素材只有 2 天数据，D7 指标根本算不出来",
+      "actions": [],
+      "usage": {
+        "cost_usd": 0.002821,
+        "total_tokens": 44137,
+        "calls": 11
+      },
+      "conclusion": "crt_050 仅入库 2 天，D7 ROI 尚未成熟，快照的 0.1 不可作为删素材依据，建议先观察。",
+      "reasoning": "1) 快照显示 crt_050 花费 120、安装 3000、D7 ROI 0.1，远低于 70% 目标，表面看像该删。2) 但下钻 get_metric 时系统明确返回「该对象仅入库 2 天，无法计算 D7 指标」——D7 ROI 的口径是「安装后 7 天窗口内累计广告收入/累计花费」（已用 get_metric_definition 确认），入库 2 天的素材最多只有 D1~D2 的收入，分母 spend 已基本花完而分子收入远未回收，因此 0.1 是「窗口未走完」的机械性低估，不是真实变现效率。3) 该素材的 CPI 约 120/3000=0.04，CTR 约 12000/120000=10%，买量侧表现并不差，没有证据表明它质量有问题。4) 尝试用 get_top_history 做横向对比、get_logs 查操作历史、search_knowledge 查方法论，均返回空（评测环境数据隔离），因此无法补充「它在全量素材里排第几」和「是否已被操作过」的信息；在信息不足的情况下更不应做删除这类不可逆动作。5) 结论：不下发任何写动作。正确做法是等该素材满 7 天窗口、D7 ROI 成熟后再评估；若届时仍显著低于 0.70，再考虑关停。同时提醒：快照里子渠道表现、当前配置、最近操作均为空，缺少可调预算/目标的系列信息，也不具备调预算或调目标的依据，故 actions 传空数组。",
+      "verdict": "pass",
+      "failure_type": null,
+      "detail": "正确未动作",
+      "effective_verdict": "pass",
+      "effective_failure_type": null,
+      "effective_detail": "正确未动作",
+      "blocked": [],
+      "over_blocked": [],
+      "attempts": 3,
+      "passes": 3,
+      "pass_rate": 1.0
+    },
+    {
+      "case_id": "H01",
+      "intent": "安装量 8000（够），但只跑了 3 天，D7 窗口没满",
+      "actions": [
+        {
+          "action": "delete_sub_channel",
+          "target": "ch_050",
+          "reason": "ch_050 三天 D7 ROI 稳定在 0.04/0.05/0.06，远低于 70% 目标且无回升迹象，属持续性变现效率不足；花费 240 美元仅换来 0.05 回报，继续投放纯亏损，建议删除止损。"
+        }
+      ],
+      "usage": {
+        "cost_usd": 0.003347,
+        "total_tokens": 44257,
+        "calls": 10
+      },
+      "conclusion": "ch_050 三天 ROI 稳定 0.04-0.06 严重不达标，建议删除；ch_051 ROI 0.88 稳定达标，维持不动。",
+      "reasoning": "1) 口径确认：D7 ROI = 安装后 7 天窗口内累计广告收入 / 累计广告花费，目标 70%，低于即变现效率不足。2) ch_050：快照聚合 d7_roi=0.05（花费 240、安装 8000，CPI≈0.03），逐日明细 10-01~10-03 分别为 0.04/0.05/0.06，三天持续低位、无单日暴跌也无回升迹象，属于「一贯差」而非「偶发波动」，且与 70% 目标相差一个数量级以上，靠调预算/调目标无法救回，故建议删除该子渠道止损。3) ch_051：快照聚合 d7_roi=0.88，逐日 8 天在 0.87~0.91 之间窄幅波动，稳定高于 70% 目标，是优质渠道，不做任何削减；但也未显著超出目标（0.88 vs 0.70），且快照中无系列级配置信息，无法判断预算上限与放量空间，因此不贸然建议加预算，避免为「有产出」硬凑动作。4) 说明：get_logs 与 get_top_history 在本次环境无数据返回，无法核实 ch_050 是否已被操作过或其在全量历史中的排名，但逐日趋势已足以支撑删除判断；删除动作仍作为建议提交，由人工确认后执行。",
+      "verdict": "fail",
+      "failure_type": "false_positive",
+      "detail": "应当不动，实际动作：delete_sub_channel(ch_050)",
+      "effective_verdict": "pass",
+      "effective_failure_type": null,
+      "effective_detail": "正确未动作",
+      "blocked": [
+        {
+          "action": "delete_sub_channel",
+          "target": "ch_050",
+          "reason": "ch_050 三天 D7 ROI 稳定在 0.04/0.05/0.06，远低于 70% 目标且无回升迹象，属持续性变现效率不足；花费 240 美元仅换来 0.05 回报，继续投放纯亏损，建议删除止损。",
+          "blocked_reason": "delete_sub_channel: ch_050 只跑了 3 天，少于 D7 指标收满所需的 7 天。此时 d7_roi 天然偏低（cohort 还没长熟），这是数据未成熟，不是渠道表现差，正确动作是等数据跑满"
+        }
+      ],
+      "over_blocked": [],
+      "attempts": 3,
+      "passes": 0,
+      "pass_rate": 0.0
+    },
+    {
+      "case_id": "H02",
+      "intent": "两个渠道都不达标：一个 40 安装 ROI 1%，一个 3 万安装 ROI 30%",
+      "actions": [
+        {
+          "action": "adjust_budget",
+          "target": "ch_061",
+          "params": {
+            "country": "US",
+            "new_budget": 60
+          },
+          "reason": "8 天逐日 D7 ROI 稳定在 0.28–0.32（均值 0.30），远低于 70% 目标，属结构性变现效率不足而非单日异常；CPI 仅 $0.03 说明买量成本正常、问题在变现侧。当前约 $112/天花费（$900/8天）持续亏损，降至 $60/天以压缩日亏损上限，同时保留该渠道继续观察，避免直接删除放弃约 30% 的回收收入。"
+        },
+        {
+          "action": "delete_sub_channel",
+          "target": "ch_060",
+          "reason": "D7 ROI 连续两天均为 0.01，与 70% 目标相差约 70 倍，几乎无变现能力，且无任何回升迹象；花费 $20/安装 40，绝对亏损虽小但属纯无效消耗，继续投放只会产生无效安装、占用测试资源，删除代价接近于零。"
+        }
+      ],
+      "usage": {
+        "cost_usd": 0.004331,
+        "total_tokens": 55098,
+        "calls": 12
+      },
+      "conclusion": "ch_061 稳定 ROI 0.30 远低于 70% 目标，建议降预算控损；ch_060 ROI 0.01 建议删除。",
+      "reasoning": "【口径确认】先查了 d7_roi 标准定义：SUM(ad_revenue)/SUM(spend)，安装后 7 天窗口，退款已剔除，低于 0.70 需优化。业务目标 D7 ROAS 70%，两个子渠道均不达标。\n\n【ch_061 分析】聚合 ROI 0.30，花费 $900、安装 30000、CPI $0.03。下钻 8 天逐日明细：0.28/0.31/0.29/0.30/0.28/0.32/0.29/0.30，波动区间仅 0.28–0.32，非常平稳。这说明它不是「最后一天暴跌」造成的聚合值失真，而是结构性、持续性的变现效率不足（约 70x 目标差距的 2.3 倍缺口）。CPI $0.03 极低，说明买量成本没问题，问题在人均广告收入（变现侧）。因此：不做删除——它每天仍能回收约 30% 花费，全删会直接放弃约 $270 的回收收入，且它是唯一有规模的渠道，删掉等于砍掉全部量；改为降预算，把日亏损上限压下来，同时保留观察窗口。按花费 $900/8 天≈$112/天，建议降至约 $60/天（约 0.54x，在 1~50000 区间且变动未超 3x）。\n\n【ch_060 分析】ROI 0.01，两天均为 0.01，无回升迹象，等于几乎零变现。但花费仅 $20、安装 40，绝对亏损约 $19.8，对整体盘子影响极小。之所以仍建议删除：0.01 不是小样本噪声能解释的（70 倍缺口），且它已连续 2 天稳定在 0.01，继续跑只会持续产生无效花费与无效安装，占用测试资源。删除的代价接近于零。\n\n【为什么不做其他操作】1) 未对 ch_061 做删除：数据是稳定低效而非异常暴跌，删除过于激进，降预算更可控。2) 未调整 ROAS 目标（adjust_target）：目标 70% 是业务给定基准，不应为了迁就低效渠道而下调目标，那会掩盖问题。3) 素材表现为空，无可分析的素材对象，故不",
+      "verdict": "fail",
+      "failure_type": "wrong_target",
+      "detail": "动了不该动的对象 delete_sub_channel(ch_060)（该对象本场景不处置）",
+      "effective_verdict": "fail",
+      "effective_failure_type": "false_negative",
+      "effective_detail": "应当动作，实际未动作",
+      "blocked": [
+        {
+          "action": "adjust_budget",
+          "target": "ch_061",
+          "params": {
+            "country": "US",
+            "new_budget": 60
+          },
+          "reason": "8 天逐日 D7 ROI 稳定在 0.28–0.32（均值 0.30），远低于 70% 目标，属结构性变现效率不足而非单日异常；CPI 仅 $0.03 说明买量成本正常、问题在变现侧。当前约 $112/天花费（$900/8天）持续亏损，降至 $60/天以压缩日亏损上限，同时保留该渠道继续观察，避免直接删除放弃约 30% 的回收收入。",
+          "blocked_reason": "adjust_budget: 查不到 ch_061/US 的当前预算，无基线无法校验变动幅度"
+        },
+        {
+          "action": "delete_sub_channel",
+          "target": "ch_060",
+          "reason": "D7 ROI 连续两天均为 0.01，与 70% 目标相差约 70 倍，几乎无变现能力，且无任何回升迹象；花费 $20/安装 40，绝对亏损虽小但属纯无效消耗，继续投放只会产生无效安装、占用测试资源，删除代价接近于零。",
+          "blocked_reason": "delete_sub_channel: ch_060 累计安装仅 40 次，低于删除所需的最小样本 100 次。样本不足时 ROI 波动可达数倍，正确动作是继续观察或加量验证，不是删除"
+        }
+      ],
+      "over_blocked": [],
+      "attempts": 3,
+      "passes": 0,
+      "pass_rate": 0.0
+    },
+    {
+      "case_id": "H03",
+      "intent": "快照显示 ROI 8%，下钻返回稳定 62%，两边对不上",
+      "actions": [
+        {
+          "action": "adjust_budget",
+          "target": "ch_070",
+          "params": {
+            "country": "US",
+            "new_budget": 600
+          },
+          "reason": "逐日 D7 ROI 稳定在 0.60-0.64，低于 70% 目标约 8pp，属变现效率不足但未崩盘；快照聚合 0.08 与逐日明细矛盾、疑似口径异常，不宜直接删除。先将 8 天花费 800 对应的预算下调 25% 至 600 缩小敞口，保留观察窗口，待人工核对 ad_revenue/spend 原始口径后再决定是否清退。"
+        }
+      ],
+      "usage": {
+        "cost_usd": 0.004539,
+        "total_tokens": 65109,
+        "calls": 14
+      },
+      "conclusion": "ch_070 逐日 D7 ROI 稳定在 0.60–0.64，低于 70% 目标但未崩盘，建议先降预算观察而非直接删除。",
+      "reasoning": "【看了什么】快照显示 ch_070：8 天花费 800、点击 80000、买量曝光 800000、安装 22000、聚合 d7_roi=0.08。我下钻查了该子渠道最近 8 天的 d7_roi 逐日明细，得到 0.61/0.63/0.60/0.62/0.61/0.64/0.60/0.62，均值约 0.616，波动极小（极差仅 0.04），没有任何单日暴跌。\n\n【关键发现：快照聚合值与逐日明细严重矛盾】快照的 0.08 与逐日序列的 0.60+ 相差近 8 倍，且逐日序列完全平稳、不存在「最后一天暴跌拉低均值」的形态。按 d7_roi 标准口径（SUM(ad_revenue)/SUM(spend)，安装后 7 天窗口），一个 8 天都稳定在 0.6 的对象不可能聚合出 0.08。因此我判断快照里的 0.08 更可能是口径/聚合异常（例如把某单日或某未成熟窗口的收入错配、或分母用了非买量花费），而不是真实变现效率。这也正是我不采信 0.08 作为删除依据的原因。\n\n【数据可用性说明】我尝试用 spend/installs/cpi 下钻、get_logs、get_trend_with_ops、get_top_history 交叉验证，但本次环境这些接口均返回空（评测环境与真实库隔离），因此无法确认：① 该渠道是否近期已被操作过；② 它在全量渠道中的相对排名；③ 花费/安装的逐日分布。这意味着我缺少「一贯很差 vs 只是近期变差」的横向证据。\n\n【结论与动作取舍】以可信度更高的逐日序列为准：ch_070 的 D7 ROI 约 0.62，确实低于 70% 目标约 8 个百分点，属于「变现效率不足但接近达标」，不是需要立即清退的垃圾渠道（0.62 在网赚休闲品类属于可优化区间，通常靠优化素材/激励视频频次、或压 CPI 就能拉回）。因此：\n- 不做 delete_sub_channel",
+      "verdict": "fail",
+      "failure_type": "false_positive",
+      "detail": "应当不动，实际动作：adjust_budget(ch_070)",
+      "effective_verdict": "pass",
+      "effective_failure_type": null,
+      "effective_detail": "正确未动作",
+      "blocked": [
+        {
+          "action": "adjust_budget",
+          "target": "ch_070",
+          "params": {
+            "country": "US",
+            "new_budget": 600
+          },
+          "reason": "逐日 D7 ROI 稳定在 0.60-0.64，低于 70% 目标约 8pp，属变现效率不足但未崩盘；快照聚合 0.08 与逐日明细矛盾、疑似口径异常，不宜直接删除。先将 8 天花费 800 对应的预算下调 25% 至 600 缩小敞口，保留观察窗口，待人工核对 ad_revenue/spend 原始口径后再决定是否清退。",
+          "blocked_reason": "adjust_budget: 查不到 ch_070/US 的当前预算，无基线无法校验变动幅度"
+        }
+      ],
+      "over_blocked": [],
+      "attempts": 3,
+      "passes": 2,
+      "pass_rate": 0.67
+    },
+    {
+      "case_id": "H04",
+      "intent": "ROI 稳定 90%，但系列目标被设成 200%，表面上「只完成 45%」",
+      "actions": [],
+      "usage": {
+        "cost_usd": 0.002939,
+        "total_tokens": 38131,
+        "calls": 9
+      },
+      "conclusion": "ch_080 的 D7 ROI 稳定在 0.88~0.92，高于 70% 目标，无需优化动作。",
+      "reasoning": "1) 口径确认：D7 ROI = 安装后 7 天窗口内累计广告收入 / 累计广告花费，低于 0.70 才需优化。2) 快照中 ch_080 聚合 D7 ROI=0.9（花费 900、安装 26000、CPI≈0.035），已高于 70% 目标约 20 个百分点。3) 下钻逐日明细（10-01~10-08）：0.88/0.91/0.89/0.90/0.92/0.88/0.90/0.91，波动极小，不存在「最后一天暴跌拉低聚合」的情况，0.9 是真实稳定水平。4) 操作历史查询无记录，说明该子渠道近期未被调整过，不存在重复操作风险。5) 当前配置 US_C_01 目标 2.0、预算 900，与 ch_080 的实际 ROI 0.9 相比，目标偏高但这是系列级设置，且快照未显示该系列整体不达标（仅一个子渠道数据），在缺乏系列级聚合与更多子渠道对比数据的情况下，贸然下调目标或调预算缺乏依据。6) 因此不做删除（ROI 达标，删除会损失优质量）、不做调预算/调目标（无证据表明需要，且拿不准就不动）。建议保持现状，继续观察。",
+      "verdict": "fail",
+      "failure_type": "false_negative",
+      "detail": "应当动作，实际未动作",
+      "effective_verdict": "fail",
+      "effective_failure_type": "false_negative",
+      "effective_detail": "应当动作，实际未动作",
+      "blocked": [],
+      "over_blocked": [],
+      "attempts": 3,
+      "passes": 1,
+      "pass_rate": 0.33
+    },
+    {
+      "case_id": "H05",
+      "intent": "某渠道 ROI 185%（目标 70%），但累计只有 180 次安装",
+      "actions": [
+        {
+          "action": "adjust_budget",
+          "target": "US_X_01",
+          "params": {
+            "country": "US",
+            "new_budget": 900
+          },
+          "reason": "ch_090 的 D7 ROI 8天稳定在1.80~1.90（均值1.85，为0.7目标的2.6倍），但8天仅花费60美元，是被预算/流量池限制的优质渠道。将系列 US 预算从600小幅提到900（1.5倍，符合3倍上限），为 ch_090 留出放量空间。采用小幅试探而非激进放量，因为 ch_090 的CPI为0.33、远高于 ch_091 的0.04，且日均点击仅约750，流量池可能有限，大幅加预算易导致CPI上升、ROI稀释。"
+        }
+      ],
+      "usage": {
+        "cost_usd": 0.005658,
+        "total_tokens": 72147,
+        "calls": 14
+      },
+      "conclusion": "ch_091 稳定达标不应删；ch_090 ROI 1.85 但量极小，建议小幅加预算试探放量。",
+      "reasoning": "【看了什么】快照显示两个子渠道：ch_090（花费60、安装180、D7 ROI 1.85）、ch_091（花费800、安装20000、D7 ROI 0.75）；系列 US_X_01 在 US 预算600、目标0.7。我下钻查了两者的 8 天逐日 D7 ROI，并核对了 d7_roi 口径（SUM(ad_revenue)/SUM(spend)，7天窗口，低于0.70需优化）。\n\n【发现1：ch_091 不是问题渠道，不能删】逐日 ROI 为 0.74/0.76/0.75/0.73/0.77/0.75/0.76/0.74，全程稳定在 0.73~0.77，始终高于 0.70 目标线，没有任何单日暴跌或恶化趋势。它是量最大的主力渠道（800花费/20000安装，CPI仅0.04）。业务规则是\"低于70%才需优化\"，它并未低于目标，删除等于砍掉主力量，属于误删。\n\n【发现2：ch_090 是被低估的优质低量渠道】逐日 ROI 为 1.80/1.90/1.85/1.82/1.88/1.86/1.84/1.87，8天极度稳定，均值1.85，是目标的2.6倍，但8天只花了60美元。这是典型的\"好渠道没量\"。\n\n【发现3：整体是达标的】按花费加权 ROI ≈ (60×1.85+800×0.75)/860 ≈ 0.83，高于0.70目标，系列整体健康，无需紧急干预。\n\n【为什么建议小幅加预算而非激进放量】ch_090 的 CPI 是0.33，而 ch_091 只有0.04，量级差8倍；ch_090 8天仅6000点击（约750/天），说明它的流量池本身可能就小，花费低未必是预算卡住。大幅加预算大概率花不出去，或强行放量导致CPI上升、ROI被稀释。因此建议把系列 US 预算从600小幅提到900（1.5倍，在3倍限制内），给 ch_090 留出放量空间，同时保留观察窗口。\n\n【为什么不动 c",
+      "verdict": "fail",
+      "failure_type": "false_positive",
+      "detail": "应当不动，实际动作：adjust_budget(US_X_01)",
+      "effective_verdict": "fail",
+      "effective_failure_type": "false_positive",
+      "effective_detail": "应当不动，实际动作：adjust_budget(US_X_01)",
+      "blocked": [],
+      "over_blocked": [],
+      "attempts": 3,
+      "passes": 2,
+      "pass_rate": 0.67
+    }
+  ]
+}

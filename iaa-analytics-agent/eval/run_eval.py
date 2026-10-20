@@ -142,6 +142,64 @@ def run_case(case: scenarios.Case, max_rounds: int = 8,
     return worst
 
 
+def _check_stub_consistency(case) -> List[str]:
+    """检查假工具返回的数据是否和快照自洽。
+
+    为什么需要这条检查：
+        2026-10-20 那天连着踩了两次同一个坑。第一次 S02 的假工具不管查谁都
+        返回同一串 0.05，Agent 当场指出「数据串号」；第二次 S03 的假工具
+        对健康的 ch_012 也返回 0.11（快照是 0.92），Agent 判定「明细与聚合矛盾」
+        然后拒绝动作 —— 报表上表现为「模型退化」，实际是场景在撒谎。
+
+        这类 bug 特别隐蔽：场景不会报错，只会让 Agent 显得很笨。
+        更糟的是它会**偷换被测的东西**——本来要测「该动的时候敢不敢动」，
+        结果测成了「数据矛盾时会不会停手」。
+
+    检查方法：
+        同一场景里若有两个以上对象、且它们的 ROI 差异超过 2 倍，
+        就要求假工具对不同 obj_id 返回不同的明细。返回完全一样 = 报警。
+
+    这个判据不看数值是否精确吻合（刻意设计的不一致，如 H03 是对的），
+    只看「有没有按对象区分」——误报率低，能抓住真正的问题。
+    """
+    errs: List[str] = []
+    fn = (case.tools or {}).get("get_metric")
+    if fn is None:
+        return errs
+
+    for key, id_field in (("子渠道表现", "sub_channel"), ("素材表现", "creative_id")):
+        rows = case.snapshot.get(key) or []
+        rois = [(r.get(id_field), r.get("d7_roi")) for r in rows
+                if r.get(id_field) and isinstance(r.get("d7_roi"), (int, float))]
+        if len(rois) < 2:
+            continue
+        lo = min(v for _, v in rois)
+        hi = max(v for _, v in rois)
+        if lo <= 0 or hi / lo <= 2:
+            continue   # 数值接近，返回同一份数据也不会露馅
+
+        try:
+            means = {}
+            for oid, _ in rois:
+                res = fn(obj_type="sub_channel" if key == "子渠道表现" else "creative",
+                         obj_id=oid, metric="d7_roi")
+                vals = [d.get("d7_roi") for d in (res.get("data") or [])
+                        if isinstance(d.get("d7_roi"), (int, float))]
+                if vals:
+                    means[oid] = round(sum(vals) / len(vals), 6)
+        except Exception as e:
+            errs.append(f"get_metric 桩调用失败: {e}")
+            continue
+
+        if len(means) >= 2 and len(set(means.values())) == 1:
+            pairs = " / ".join(f"{k}={v}" for k, v in means.items())
+            errs.append(
+                f"假工具不区分对象，多个 {id_field} 返回同一份明细（{pairs}）。"
+                f"快照里它们的 ROI 相差 {hi / lo:.1f} 倍，Agent 会先发现「数据串位」，"
+                f"测的就不是原来的陷阱了")
+    return errs
+
+
 def dry_run(cases: List[scenarios.Case]) -> int:
     """只校验场景定义，不调 LLM。
 
@@ -193,6 +251,8 @@ def dry_run(cases: List[scenarios.Case]) -> int:
         for name in c.tools:
             if not hasattr(agent, f"_tool_{name}"):
                 errs.append(f"假工具名不存在: _tool_{name}")
+
+        errs += _check_stub_consistency(c)
 
         if errs:
             problems += 1

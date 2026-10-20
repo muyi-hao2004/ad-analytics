@@ -201,6 +201,36 @@ def _get_channel_installs(sub_channel: str) -> Optional[int]:
         return None
 
 
+def _get_channel_observed_days(sub_channel: str) -> Optional[int]:
+    """某子渠道覆盖了多少个 install_date（也就是「跑了多少天」）。
+
+    为什么按 install_date 去重计数，而不是用 max-min+1：
+        中间断投的渠道（停了两天又开）用日期差会算成 10 天，但实际只有 8 天数据。
+        护栏要判断的是「有没有足够的成熟 cohort」，看的是**实际有数据的天数**，
+        不是日历跨度。所以用 nunique。
+
+    为什么返回 Optional：
+        和 _get_channel_installs 同理——None 是「查不到」，0 是「确实一天没跑」，
+        护栏对前者要 fail-closed 拒绝，对后者要给「数据未成熟」的明确理由。
+    """
+    if not sub_channel:
+        return None
+    try:
+        import pandas as pd
+        path = config.ADS_DIR / "sub_channel_table.parquet"
+        if not path.exists():
+            return None
+        df = pd.read_parquet(path)
+        if "sub_channel" not in df.columns or "install_date" not in df.columns:
+            return None
+        rows = df[df["sub_channel"] == sub_channel]
+        if rows.empty:
+            return None
+        return int(pd.to_datetime(rows["install_date"]).nunique())
+    except Exception:
+        return None
+
+
 # ============================================================
 # 2. 工具定义（说明书）+ 工具注册表（查表执行）
 # ============================================================
@@ -1142,9 +1172,11 @@ def _current_context_for(action: Dict[str, Any]) -> Dict[str, Any]:
     if a_type in ("adjust_budget", "adjust_target"):
         return _get_current_cfg(target, params.get("country", ""))
     if a_type == "delete_sub_channel":
-        # 删除看样本量不看预算。查不到时 _get_channel_installs 返回 None，
-        # 护栏据此 fail-closed 拒绝——不能因为「读数据失败」就放行删除。
-        return {"installs": _get_channel_installs(target)}
+        # 删除要看两个独立维度：样本量（装了多少次）+ 观察时长（跑了多少天）。
+        # 查不到任一个都返回 None，护栏据此 fail-closed 拒绝——
+        # 不能因为「读数据失败」就放行删除。
+        return {"installs": _get_channel_installs(target),
+                "days": _get_channel_observed_days(target)}
     return {}
 
 

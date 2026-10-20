@@ -50,7 +50,7 @@ class TestValidateAction:
     def test_正常删除通过(self):
         ok, _ = g.validate_action({
             "action": "delete_sub_channel", "target": "ch_003", "reason": "连续7天 ROI<50%"},
-            current={"installs": 21_000})
+            current={"installs": 21_000, "days": 8})
         assert ok
 
     # ---------- 删除的样本量门槛 ----------
@@ -74,18 +74,49 @@ class TestValidateAction:
         assert "安装量" in why
 
     def test_安装量刚好达门槛通过(self):
-        """边界值：等于阈值应当放行，避免规则写成 >= 还是 > 的歧义。"""
+        """边界值：等于阈值应当放行，避免规则写成 >= 还是 > 的歧义。
+
+        注意 days 必须一起给：护栏对删除有两个独立门槛，缺任一个都会
+        fail-closed。这正是「加字段要同步所有调用方」的提醒。
+        """
         ok, _ = g.validate_action({
             "action": "delete_sub_channel", "target": "ch_003", "reason": "ROI 低"},
-            current={"installs": g.MIN_INSTALLS_FOR_DELETE})
+            current={"installs": g.MIN_INSTALLS_FOR_DELETE,
+                     "days": g.MIN_DAYS_FOR_DELETE})
         assert ok
 
     def test_安装量少一次被拒(self):
         ok, why = g.validate_action({
             "action": "delete_sub_channel", "target": "ch_003", "reason": "ROI 低"},
-            current={"installs": g.MIN_INSTALLS_FOR_DELETE - 1})
+            current={"installs": g.MIN_INSTALLS_FOR_DELETE - 1,
+                     "days": g.MIN_DAYS_FOR_DELETE})
         assert not ok
-        assert "样本" in why
+
+    def test_天数够但量不够也被拒(self):
+        ok, why = g.validate_action({
+            "action": "delete_sub_channel", "target": "ch_003", "reason": "ROI 低"},
+            current={"installs": 30, "days": 30})
+        assert not ok and "样本" in why
+
+    def test_量够但天数不够被拒(self):
+        """H01 的坑：8000 安装完全够，但只跑了 3 天，D7 还没长熟。
+
+        两个门槛是 AND 关系，各自解决一个独立问题：
+        量不够是噪声，天数不够是数据未成熟。
+        """
+        ok, why = g.validate_action({
+            "action": "delete_sub_channel", "target": "ch_050", "reason": "ROI 5%"},
+            current={"installs": 8000, "days": 3})
+        assert not ok
+        assert "天" in why and "未成熟" in why
+
+    def test_查不到天数也拒绝(self):
+        """只给 installs 不给 days → fail-closed，不能默认当成跑满了。"""
+        ok, why = g.validate_action({
+            "action": "delete_sub_channel", "target": "ch_003", "reason": "ROI 低"},
+            current={"installs": 50000})
+        assert not ok
+        assert "天数" in why
 
     def test_安装量是字符串被拒(self):
         """LLM 传 "300" 这种字符串时不能被当成数字放过去。"""
@@ -290,3 +321,52 @@ class Test组装逻辑收口:
     def test_未知动作返回空(self):
         import agent
         assert agent._current_context_for({"action": "nope", "target": "x"}) == {}
+
+
+class Test组装逻辑不漂移:
+    """护栏需要的「当前状态」有**两个来源**，必须字段一致。
+
+    生产：agent._current_context_for()  查真实 parquet
+    评测：judge.current_from_snapshot()  读场景快照（评测必须与真实库隔离）
+
+    两份实现是必要的（快照数据不能来自库），但**字段集合必须一模一样**。
+    今天加 days 门槛时就差点漏掉评测侧：如果那边只返回 installs，
+    所有场景的 days 都会是 None，护栏 fail-closed 全部拒绝，
+    报表会显示「零误删」——一个看起来最好的假结果。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _mods(self):
+        evaldir = os.path.join(os.path.dirname(__file__), "..", "eval")
+        if evaldir not in sys.path:
+            sys.path.insert(0, evaldir)
+        import judge as jm
+        import scenarios
+        import agent
+        import config
+        if not (config.ADS_DIR / "sub_channel_table.parquet").exists():
+            pytest.skip("缺 sub_channel_table.parquet，跳过字段一致性检查")
+        self.jm, self.sc, self.agent = jm, scenarios, agent
+
+    def _case(self, cid):
+        return [c for c in self.sc.build_cases() if c.id == cid][0]
+
+    def test_删除动作两处字段一致(self):
+        case = self._case("H01")
+        prod = self.agent._current_context_for(
+            {"action": "delete_sub_channel", "target": "ch_001"})
+        ev = self.jm.current_from_snapshot(
+            case, {"action": "delete_sub_channel", "target": "ch_050"})
+        assert set(prod) == set(ev), f"生产 {set(prod)} vs 评测 {set(ev)}"
+        assert "days" in ev and ev["days"] == 3, "H01 的 days=3 必须能读出来"
+
+    def test_预算动作两处字段一致(self):
+        case = self._case("S05")
+        prod = self.agent._current_context_for(
+            {"action": "adjust_budget", "target": "US_A_01",
+             "params": {"country": "US"}})
+        cfg = (case.snapshot.get("当前配置") or [{}])[0]
+        ev = self.jm.current_from_snapshot(case, {
+            "action": "adjust_budget", "target": cfg.get("campaign_id"),
+            "params": {"country": (cfg.get("countries") or [{}])[0].get("country")}})
+        assert set(prod) == set(ev), f"生产 {set(prod)} vs 评测 {set(ev)}"

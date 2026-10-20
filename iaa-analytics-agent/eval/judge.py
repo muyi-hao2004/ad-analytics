@@ -129,7 +129,10 @@ def current_from_snapshot(case: Case, act: Dict[str, Any]) -> Dict[str, Any]:
     if a_type == "delete_sub_channel":
         for row in case.snapshot.get("子渠道表现") or []:
             if row.get("sub_channel") == act.get("target"):
-                return {"installs": row.get("installs")}
+                # days 必须一起带出来。护栏对删除有两个独立维度
+                # （安装量 + 观察天数），漏一个就会因为 None 触发 fail-closed，
+                # 把「数据没给全」误报成「样本不足」。
+                return {"installs": row.get("installs"), "days": row.get("days")}
         return {}
 
     if a_type in ("adjust_budget", "adjust_target"):

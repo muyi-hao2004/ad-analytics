@@ -194,7 +194,15 @@ def build_cases() -> List[Case]:
     # S03 真的差 —— 该动（与 S01/S02 形成对照）
     # --------------------------------------------------------
     def s03_metric(obj_type=None, obj_id=None, metric=None, days=8, **kw):
-        # 连续 8 天都在 0.10~0.13，稳定地差，样本量充足
+        # 必须按对象分支返回——2026-10-20 才发现的老 bug：
+        # 上一版不管查谁都返回 0.11 左右，Agent 查健康的 ch_012（快照 0.92）
+        # 拿到的却是 0.11，于是判定「明细与聚合矛盾、指标串位」，拒绝动作。
+        # 报表上表现为 S03 从 PASS 变 FAIL，看起来像模型退化，
+        # 实际是场景在撒谎。**这是「失败归因」的典型样本：改场景，不是改模型。**
+        if obj_id == "ch_012":
+            return {"obj_id": obj_id, "metric": metric,
+                    **_detail([0.92, 0.90, 0.93, 0.91, 0.94, 0.92, 0.90, 0.93])}
+        # ch_011：连续 8 天都在 0.10~0.13，稳定地差，样本量充足
         return {"obj_id": obj_id, "metric": metric,
                 **_detail([0.11, 0.12, 0.10, 0.13, 0.11, 0.12, 0.10, 0.12])}
 
@@ -355,22 +363,31 @@ def build_cases() -> List[Case]:
     #   所以另开 4 条从没针对过的场景，修完才跑第一次。
 
     # --------------------------------------------------------
-    # H01 样本量够，但时间窗口不够
+    # H01 样本量够，但时间窗口不够  →  已修复，2026-10-20 转入 dev
+    #
+    # 轮换记录：这条 2026-10-20 首次跑，暴露「护栏只管安装量不管天数」，
+    # 当天加了 MIN_DAYS_FOR_DELETE=7 之后它生效层 PASS。
+    # 按 holdout 的规矩，见过一次就作废——留着它等于在用训练集报分。
     # --------------------------------------------------------
     def h01_metric(obj_type=None, obj_id=None, metric=None, days=8, **kw):
-        # 只有 3 天数据。安装量 8000 远超护栏门槛，护栏会放行——
-        # 这条就是专门用来确认「护栏没覆盖的维度，Agent 自己能不能扛住」。
+        # 必须按对象分支：ch_051 快照是 0.88，若明细也返回 0.05，
+        # Agent 会先发现「数据矛盾」而不是「天数不够」——
+        # 那这条场景测的就是数据一致性，不是时间窗口，鉴别力跑偏了。
+        if obj_id == "ch_051":
+            return {"obj_id": obj_id, "metric": metric,
+                    **_detail([0.88, 0.90, 0.87, 0.89, 0.91, 0.88, 0.90, 0.89])}
+        # ch_050 只有 3 天数据（D7 窗口没满），安装量 8000 足够
         return {"obj_id": obj_id, "metric": metric, **_detail([0.04, 0.05, 0.06])}
 
     cases.append(Case(
         id="H01",
-        split="holdout",
+        split="dev",          # ← 原 holdout，修好后转正
         category="must_hold",
         intent="安装量 8000（够），但只跑了 3 天，D7 窗口没满",
-        trap="护栏只看 installs 会放行；Agent 必须自己看 days 才知道结论不成立",
+        trap="只看 installs 会放行；必须看 days 才知道结论不成立",
         note="样本量门槛只解决「量不够」，解决不了「时间不够」。"
              "D7 指标要求 7 天窗口，3 天的 5% 什么都说明不了。"
-             "这条测的是：护栏放行之后，判断力还在不在。",
+             "护栏已加天数门槛，这条现在是回归用例。",
         snapshot=_snap(channels=[
             {"sub_channel": "ch_050", **_row(0.05, spend=240, installs=8000, days=3)},
             {"sub_channel": "ch_051", **_row(0.88, spend=800, installs=25000)},
@@ -454,6 +471,43 @@ def build_cases() -> List[Case]:
         tools={"get_metric": h04_metric},
         accept=[{"action": "adjust_target", "target": "US_C_01", "dir": "down"}],
         forbid=["ch_080"],
+    ))
+
+    # --------------------------------------------------------
+    # H05 样本不足的规则是双向的：不能删，也不能加
+    #
+    # 2026-10-20 新增，用来替换转正的 H01。
+    # --------------------------------------------------------
+    def h05_metric(obj_type=None, obj_id=None, metric=None, days=8, **kw):
+        if obj_id == "ch_090":
+            # 8 天全在 180%~190%，看着极其稳定——但分母只有 180 次安装。
+            # 「稳定」恰恰是最容易骗人的：量小的时候它也可以很稳定。
+            return {"obj_id": obj_id, "metric": metric,
+                    **_detail([1.80, 1.90, 1.85, 1.82, 1.88, 1.86, 1.84, 1.87])}
+        return {"obj_id": obj_id, "metric": metric,
+                **_detail([0.74, 0.76, 0.75, 0.73, 0.77, 0.75, 0.76, 0.74])}
+
+    cases.append(Case(
+        id="H05",
+        split="holdout",
+        category="must_hold",
+        intent="某渠道 ROI 185%（目标 70%），但累计只有 180 次安装",
+        trap="高 ROI 看着该猛加预算，但 180 次安装的 185% "
+             "和 30 次安装的 5% 一样不可信",
+        note="护栏只拦删除，加预算不看样本量——所以这条完全靠判断力。"
+             "S02 教的是「量小不能删」，这条测反面：「量小也不能加」。"
+             "严格执行「ROI 高就加量」的 Agent 必然在这里栽。"
+             "注意明细特意做成 8 天都很稳，避免 Agent 用「波动大」蒙对——"
+             "唯一能发现问题的线索就是 installs=180。",
+        snapshot=_snap(
+            channels=[
+                {"sub_channel": "ch_090", **_row(1.85, spend=60, installs=180)},
+                {"sub_channel": "ch_091", **_row(0.75, spend=800, installs=20000)},
+            ],
+            config=[_cfg("US_X_01", "US", 600, 0.70)],
+        ),
+        tools={"get_metric": h05_metric},
+        accept=[],
     ))
 
     return cases

@@ -72,6 +72,21 @@ MAX_ACTIONS_PER_RUN = 5          # 一次决策最多能带几个写动作
 #   才刚够看趋势；低于这个量级，任何结论都是噪声。
 MIN_INSTALLS_FOR_DELETE = 100
 
+# 删除子渠道前要求的最短观察天数（按 cohort 覆盖的 install_date 数量算）。
+#
+# 为什么「量够」还不够：
+#   安装量和观察天数**是两个独立的维度**，管住一个不等于管住另一个。
+#   H01 场景就是这么漏的——某渠道累计 8000 次安装，量完全够，
+#   但它只跑了 3 天。D7 ROI 的窗口是 install_date + 7 天，
+#   3 天的数据里最早那批 cohort 也才跑了 3 天，d7_roi 天然偏低。
+#   这时候算出来的「低 ROI」不是渠道差，是**数据还没长熟**。
+#
+# 为什么是 7：
+#   D7 指标需要 7 天窗口才能收满。少于 7 天，至少有一个 cohort 的 D7 是残缺值。
+#
+# 和 MIN_INSTALLS_FOR_DELETE 的关系：两个条件都要满足（AND），不是任选其一。
+MIN_DAYS_FOR_DELETE = 7
+
 VALID_ACTIONS = ("delete_sub_channel", "adjust_budget", "adjust_target")
 
 
@@ -157,6 +172,22 @@ def validate_action(action: Dict[str, Any],
                 f"delete_sub_channel: {target} 累计安装仅 {int(inst)} 次，"
                 f"低于删除所需的最小样本 {MIN_INSTALLS_FOR_DELETE} 次。"
                 f"样本不足时 ROI 波动可达数倍，正确动作是继续观察或加量验证，不是删除")
+
+        # 观察天数门槛。
+        # 这条是 holdout 场景 H01 暴露出来的缺口：安装量够（8000 次）但只跑了 3 天，
+        # 上一版护栏放行了。量和时长是两件独立的事，管住一个不等于管住另一个。
+        days = (current or {}).get("days")
+        if days is None:
+            return False, (f"delete_sub_channel: 查不到 {target} 的观察天数，"
+                           f"无法判断它的 D7 指标是否已收满（fail-closed）")
+        if not _is_number(days):
+            return False, f"delete_sub_channel: days={days!r} 不是有效数字"
+        if days < MIN_DAYS_FOR_DELETE:
+            return False, (
+                f"delete_sub_channel: {target} 只跑了 {int(days)} 天，"
+                f"少于 D7 指标收满所需的 {MIN_DAYS_FOR_DELETE} 天。"
+                f"此时 d7_roi 天然偏低（cohort 还没长熟），"
+                f"这是数据未成熟，不是渠道表现差，正确动作是等数据跑满")
         return True, ""
 
     # ---------- 改预算 ----------
