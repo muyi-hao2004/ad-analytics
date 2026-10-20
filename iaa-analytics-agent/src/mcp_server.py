@@ -171,15 +171,12 @@ def submit_suggestion(actions: list, reasoning: str = "") -> Dict[str, Any]:
     # 批量预检：数量上限 + 同对象去重
     accepted, batch_rejected = guardrails.check_batch(actions)
 
-    # 逐条业务边界校验：拿当前真实配置算变动幅度
+    # 逐条业务边界校验：拿当前真实状态算变动幅度 / 样本量
+    # 用 agent._current_context_for 而不是在这里重写一遍——
+    # 之前这里只处理了 budget/target，导致合法的删除建议在提交阶段就被拒。
     passed, blocked = [], []
     for a in accepted:
-        current = {}
-        a_type = a.get("action")
-        target = a.get("target") or ""
-        country = (a.get("params") or {}).get("country", "")
-        if a_type in ("adjust_budget", "adjust_target"):
-            current = agent._get_current_cfg(target, country)
+        current = agent._current_context_for(a)
 
         ok, why = guardrails.validate_action(a, current)
         if ok:

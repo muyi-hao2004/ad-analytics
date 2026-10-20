@@ -1121,6 +1121,33 @@ def _get_current_cfg(campaign_id: str, country: str) -> Dict[str, Any]:
     return {}
 
 
+def _current_context_for(action: Dict[str, Any]) -> Dict[str, Any]:
+    """为护栏组装「该对象的当前真实状态」。
+
+    **必须收口在这一个函数里，不要让每个调用方自己拼。**
+
+    为什么：mcp_server 的 submit_suggestion 原本只处理 adjust_budget/adjust_target，
+    漏掉了 delete 需要的 installs。结果是同一个动作（删 ch_001，39833 次安装，
+    完全合法）在执行层放行、在 MCP 侧被 fail-closed 拒绝，理由还是
+    「查不到安装量」——而安装量明明查得到，只是没人去查。
+    这种「同一个守卫函数、两个调用方、各自拼参」的写法迟早会漂移，
+    所以把组装逻辑和校验逻辑分开：校验是纯函数，组装只有一个实现。
+
+    新增动作类型时只需要改这里，两处入口自动一致。
+    """
+    a_type = action.get("action") or ""
+    target = action.get("target") or ""
+    params = action.get("params") or {}
+
+    if a_type in ("adjust_budget", "adjust_target"):
+        return _get_current_cfg(target, params.get("country", ""))
+    if a_type == "delete_sub_channel":
+        # 删除看样本量不看预算。查不到时 _get_channel_installs 返回 None，
+        # 护栏据此 fail-closed 拒绝——不能因为「读数据失败」就放行删除。
+        return {"installs": _get_channel_installs(target)}
+    return {}
+
+
 def _execute_action(plat, action: Dict[str, Any]) -> Dict[str, Any]:
     """
     把解析出的写动作转成平台调用。
@@ -1136,14 +1163,8 @@ def _execute_action(plat, action: Dict[str, Any]) -> Dict[str, Any]:
     params = action.get("params") or {}
     reason = action.get("reason") or "Agent 自动优化"
 
-    # ---- 第 2 层防线：业务边界校验（拿当前真实配置算幅度）----
-    current: Dict[str, Any] = {}
-    if a_type in ("adjust_budget", "adjust_target"):
-        current = _get_current_cfg(target, params.get("country", ""))
-    elif a_type == "delete_sub_channel":
-        # 删除要看样本量，不看预算。查不到时 _get_channel_installs 返回 None，
-        # 护栏会据此 fail-closed 拒绝——不能因为「读数据失败」就放行删除。
-        current = {"installs": _get_channel_installs(target)}
+    # ---- 第 2 层防线：业务边界校验（拿当前真实状态算幅度/样本量）----
+    current = _current_context_for(action)
 
     ok, why = guardrails.validate_action(action, current)
     if not ok:
