@@ -1,0 +1,69 @@
+name: CI
+
+# 只做一件事：证明「clone 下来，测试真的能过」。
+# 不跑 Agent、不调 LLM、不需要 API key —— 单测全部用 FakeClient 和桩实现。
+#
+# 为什么 CI 只装最小依赖而不装 requirements.txt：
+#   chromadb / sentence-transformers / playwright 加起来数百 MB，且要下载模型，
+#   几分钟起步。而单测根本不碰这些（knowledge_base 是延迟导入，tools 被桩掉）。
+#   装全量只会让 CI 变慢变脆，换不来任何额外保障。
+#   要验证全量依赖，用 tasks.py check 在本地跑。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: 单测 (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: 安装最小依赖
+        working-directory: iaa-analytics-agent
+        run: |
+          python -m pip install --upgrade pip
+          # 单测只需要这几个：agent.py 顶层依赖 + pytest
+          # chromadb / sentence_transformers 在 knowledge_base 里是延迟导入
+          pip install openai pyyaml pandas pytest
+
+      - name: 跑单测
+        working-directory: iaa-analytics-agent
+        run: python -m pytest tests/ -q
+
+  eval-schema:
+    # 只校验评测场景定义是否合法（--dry-run 不调用 LLM，不花钱）。
+    # 这一步能防止「改了 scenarios.py 但字段写错」这类静默故障——
+    # 那种错在正式跑评测时才会暴露，而且要花掉一次完整评测的钱。
+    name: 评测场景定义校验
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装依赖
+        working-directory: iaa-analytics-agent
+        run: pip install openai pyyaml pandas
+
+      - name: 校验场景
+        working-directory: iaa-analytics-agent
+        run: python eval/run_eval.py --dry-run

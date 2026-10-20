@@ -84,6 +84,9 @@ iaa-analytics-agent/
 
 ## 快速开始
 
+> 有 `tasks.py` 就不用逐条敲：
+> `python tasks.py check|init|test|demo|eval|cost|all`（跨平台，不需要 make）
+
 ### 1. 安装依赖
 
 ```bash

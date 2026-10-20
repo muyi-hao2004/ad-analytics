@@ -87,7 +87,13 @@ iaa-analytics-agent/**/__pycache__/
 
 # 个人隐私 / 临时文件（不提交）
 docs/project_summary_for_cv.md
-*.png
+
+# 图片：只忽略运行产物，文档/架构图要能入库
+# （原来写的是 `*.png`，等于永远无法在 README 里放图）
+iaa-analytics-agent/reports/**/*.png
+iaa-analytics-agent/output/**/*.png
+logs/**/*.png
+!docs/**/*.png
 
 # Docker
 docker-compose.override.yml
