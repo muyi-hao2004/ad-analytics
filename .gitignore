@@ -109,6 +109,8 @@ docker-compose.override.yml
 # 个人文件（简历等）不进仓库
 *简历*.docx
 *简历*.pdf
+# 简历生成脚本内含手机号与邮箱，不入库（本地保留可用）
+scripts/gen_resume.py
 
 # 临时文件
 /query
