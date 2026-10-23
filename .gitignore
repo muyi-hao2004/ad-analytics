@@ -87,6 +87,12 @@ iaa-analytics-agent/**/__pycache__/
 
 # 个人隐私 / 临时文件（不提交）
 docs/project_summary_for_cv.md
+# 面试口述稿属于个人材料，不入公开仓库
+docs/interview/
+# 遗留的报错截图（本地排查用）
+wsl_error.png
+# 一次性探查脚本（_tmp_ 前缀 = 临时）
+scripts/_tmp_*.py
 
 # 图片：只忽略运行产物，文档/架构图要能入库
 # （原来写的是 `*.png`，等于永远无法在 README 里放图）
