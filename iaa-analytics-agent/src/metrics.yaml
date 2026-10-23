@@ -1,9 +1,9 @@
 # ============================================================
 # 语义层（Semantic Layer）：IAA 中台的核心指标口径定义
 # ============================================================
-# 这是 2026 年「数仓 Agent」最重要的资产：把业务口径从代码里抽出来，
+# 这是数仓 Agent 最重要的资产之一：把业务口径从代码里抽出来，
 # 声明式地写在这里，让 Agent（或任何调用方）在动手算数之前，
-# 先拿到「这个指标到底怎么定义、怎么算、依赖哪些字段」。
+# 先拿到「这个指标到底怎么定义、怎么算、依赖哪些字段、正常范围是多少」。
 #
 # 作用：解决「同名不同义」和「口径不一致」两大坑 ——
 #   Agent 不再对着裸表猜 "ROAS 怎么算"，而是先查这里拿标准答案。
@@ -13,17 +13,46 @@
 #   2. 每个指标写清：定义 / 公式 / 依赖字段 / 口径备注 / 所属轨道
 #   3. 口径是「业务资产」，像数据一样被管理、被版本控制，而不是埋在代码里
 #
-# 与 data_dictionary.md 一一对应，互为参照。
+# 本文件的每一块都有代码在读（不是文档，改了会生效）：
+#
+#   metrics[*]            → semantic_layer.get_metric_definition()  → Agent 决策前查口径
+#   business              → semantic_layer.get_business_context()   → Agent 拿目标线
+#   maturity              → warehouse_api.read_daily_detail()       → 过滤不完整 cohort
+#   decision_thresholds   → semantic_layer.get_thresholds()         → Agent 判「砍/加」
+#   decision_log          → 日志表语义（粒度/字段/枚举）             → 中台读「上次结论」时的对照
+#   data_quality          → dags/iaa_warehouse_dag.py 质量门禁      → 不达标就 fail 掉整条流水线
+#
+# 与 data_dictionary_user_daily.md 一一对应，互为参照。
 # ============================================================
 
-# 全局业务背景（Agent 判断「要不要优化」的基准线）
+meta:
+  version: 3
+  as_of: 2026-10-23                    # 下面所有 measured 值都是这天的实测快照
+  owner: iaa-bi
+  changelog:
+    - "v1: 只有公式，无实测基线"
+    - "v2 (2026-10-22): 补 measured 基线 / maturity 成熟度规则 / data_quality 质量断言 / decision_thresholds 决策阈值"
+    - "v3 (2026-10-23): 决策日志入仓。新增 decision_log 语义段与 4 张日志表的质量断言（含跨源对账）"
+
+# ============================================================
+# 1. 全局业务背景（Agent 判断「要不要优化」的基准线）
+# ============================================================
 business:
   market: "美国 T0"
   product: "海外网赚类 IAA 休闲游戏（纯广告变现，无内购）"
   d7_roas_target: 0.70          # D7 ROAS 目标 70%
   d7_roas_target_note: "D7 ROAS 低于 0.70 说明变现效率不足，需要优化"
+  d7_roas_actual: 0.654         # 实测全站加权 D7 ROAS（2026-10-01~10-24 成熟 cohort）
+  d7_roas_gap: -0.046           # 距目标差 4.6pt，整体处于「不达标但接近」区间
+  data_window:
+    start: 2026-10-01
+    end: 2026-10-31
+    days: 31
+    note: "尾 7 天（10-25~10-31）的 D7 指标不成熟，任何按 install_date 分组的 D7 汇总都必须排除"
 
-# 轨道：IAA 是「买量 + 变现」双轨，同名指标口径不同
+# ============================================================
+# 2. 轨道：IAA 是「买量 + 变现」双轨，同名指标口径不同
+# ============================================================
 tracks:
   acquisition:
     name: "买量侧（Acquisition）"
@@ -35,7 +64,10 @@ tracks:
     note: "时间轴双轴（install_date + report_date），cohort 口径"
 
 # ============================================================
-# 核心指标定义
+# 3. 核心指标定义
+# ============================================================
+# measured 块的口径：全部取自 lab.ads_daily_detail 中 is_mature_d7=true 的行
+# （即 install_date ≤ 2026-10-24 的 24 个完整 cohort），加权方式见各条 note。
 # ============================================================
 metrics:
 
@@ -47,6 +79,25 @@ metrics:
     fields: [ad_revenue, spend, install_date]
     note: "退款已剔除，只算已归因收入；低于 0.70 需要优化。指标 key 统一为 d7_roi（ROI 与 ROAS 在 IAA 语境下同指广告支出回报）"
     usage: "判断某批用户/某素材/某子渠道的变现效率，是删不删素材、调不调预算的核心依据"
+    measured:
+      overall: 0.654
+      daily_range: [0.6525, 0.6557]      # 24 个成熟日的加权值区间
+      by_campaign:
+        CA_A_01: 0.8725
+        US_A_01: 0.7320
+        JP_A_01: 0.6621
+        US_B_01: 0.5356
+        GB_A_01: 0.4722
+      by_sub_channel_range: [0.4720, 0.8733]   # 11 个子渠道
+      by_creative:                            # 200 个素材，花费 > 5000 才有意义
+        p10: 0.4519
+        p50: 0.6228
+        p90: 0.8799
+        min: 0.3131
+        max: 1.2413
+        spread_ratio: 3.96                    # max/min，跨 campaign 合计
+      within_campaign_spread: [2.04, 2.28]    # 单 campaign 内 max/min，5 个 campaign 的实际范围
+      note: "日级方差极小（0.6525~0.6557，极差 0.5%），说明造数没有日级趋势；因此本数据集只能演示「横截面分层」，演示不了「时序异常检测」"
 
   cpi:
     name: "安装成本（CPI）"
@@ -55,6 +106,15 @@ metrics:
     formula: "spend / installs"
     fields: [spend, installs]
     note: "买量侧指标；越低越好，反映买量效率"
+    measured:
+      by_campaign:
+        CA_A_01: 0.26
+        US_A_01: 0.32
+        GB_A_01: 0.34
+        US_B_01: 0.38
+        JP_A_01: 0.42
+      by_sub_channel_range: [0.26, 0.42]
+      note: "CPI 完全由 campaign 决定（每 campaign 固定单价），所以 CPI 高低不代表买量水平差异，只代表流量贵贱"
 
   buy_ctr:
     name: "买量点击率（买量 CTR）"
@@ -95,6 +155,10 @@ metrics:
     formula: "active_users(install_date+6) / installs"
     fields: [active_users, installs]
     note: "衡量用户质量，D7 留存高说明用户粘性好"
+    measured:
+      overall: 0.1173
+      acceptable_band: [0.10, 0.14]
+      note: "实测 11.73%（DWS 层按成熟 cohort 加权）。验收断言用 10%~14% 这段；超出说明留存模型被改坏了"
 
   # ---- 全程指标（D0~Dn，日常表左上三角横铺用）----
   # 说明：以下四个指标都是「按天展开」的系列，day_offset = n（n=0,1,2,...）。
@@ -142,8 +206,309 @@ metrics:
     note: "观次 = 用户主动看激励视频的次数；反映激励视频变现潜力"
 
 # ============================================================
-# 派生指标「是否入库」约定：只存原子，派生用时算
+# 4. cohort 成熟度（Maturity）—— 最容易出错、也最容易被忽略的一条
+# ============================================================
+# 问题：D7 指标的分母（花费）在装机当天就全额产生了，
+#       分子（收入）要到装机后第 7 天才攒满。
+#       所以「昨天装机的那批用户」，D7 ROI 一定显著偏低 —— 不是质量差，是还没长出来。
+#
+# 实测（本次踩到的真实案例）：
+#   ch_001 的 D7 ROI，10-24 是 0.7325，10-31 是 0.3644。
+#   如果不做成熟度过滤，Agent 会读到「渠道 ROI 腰斩」的趋势，
+#   然后建议停止投放 —— 一个完全错误、代价极高的决策。
+#
+# 规则：install_date + 7 <= 数据最大日期 才算成熟。
+# ============================================================
+maturity:
+  day_window: 7
+  field: is_mature_d7
+  formula: "install_date + 7 <= MAX(report_date) of the dataset"
+  computed_in: "scripts/build_ads_iaa.py（ADS 层物化，避免每次查询现算）"
+  apply_where:
+    - get_trend_with_ops     # 判趋势必须过滤：拿不完整 cohort 判因果必错
+    - get_top_history        # 同上
+    - 任何按 install_date 分组的 D7 汇总
+  do_not_apply_where:
+    - get_metric             # 看「今天最新」是合理诉求，过滤掉反而看不到最新明细
+  measured_effect:
+    immature_partitions: ["2026-10-25", "2026-10-31"]
+    immature_rows: 3157
+    total_rows: 13981
+    ch_001_trend_after_filter: [0.726, 0.735]
+    note: "过滤前 ch_001 趋势跨度 0.3644~0.7325（2 倍假跌幅），过滤后 0.726~0.735（真实平稳）"
+
+# ============================================================
+# 5. 决策阈值（Agent 判「砍 / 保 / 加」的分界线）
+# ============================================================
+# 这些数字必须是「业务说了算」的，不能由模型即兴发挥。
+# 依据：全站 D7 ROAS 目标 0.70；实测分层见 metrics.d7_roi.measured。
+# ============================================================
+decision_thresholds:
+  channel:
+    # 相对全站目标 0.70 的偏移，而不是绝对拍脑袋
+    strong: 0.70            # ≥ 0.70 达标，可加预算
+    watch: 0.62             # 0.62~0.70 临界，观察不动作
+    weak: 0.62              # < 0.62 需要优化，其中 < 0.50 建议降预算
+    critical: 0.50
+    note: "实测分布：CA 0.873 / US_A 0.732 达标；JP 0.662 临界；US_B 0.536 / GB 0.472 不达标"
+  creative:
+    cut: 0.50               # 素材 D7 ROI < 0.50 且花费 > min_spend 建议关停
+    scale: 0.90             # > 0.90 建议加预算
+    min_spend: 5000         # 花费门槛：低于此值的素材样本量不足，不下结论
+    note: "实测 200 个素材 P10=0.4519 / P50=0.6228 / P90=0.8799；组内极差 2.04~2.28 倍，说明砍素材是有效的优化手段"
+  cpi:
+    guard_band: [0.26, 0.42]   # 超出此区间说明要么流量结构变了，要么买量出价失控
+  note: "改阈值只改这里，不要改 agent.py / guardrails.py。阈值进版本控制，改动可追溯"
+
+  # ---- 判定稳定机制（decision.py 读这段）----
+  # 为什么需要：同一份数据，LLM 每次独立推理都可能给出不同结论。
+  # 靠 prompt 要求「保持一致性」是无效的（它没有昨天的记忆），
+  # 只能把稳定性做进规则里：跨边界留死区 + 改判需连续确认。
+  hysteresis:
+    enabled: true
+    band_width: 0.04            # 死区总宽度，跨边界时上下各 0.02
+    min_consecutive_days: 3     # 改判需要连续确认的天数
+    note: >-
+      死区解决「值在阈值上下来回跳」，连续确认解决「单日事故导致一夜改判」。
+      band_width=0.04 对应素材 0.48~0.52 不动；改判需 3 天是为了过滤
+      单日投放事故（实测过：某天预算被错误加倍，ROI 单日腰斩后次日恢复，
+      若只看当天会误判为「渠道崩了」）。
+
+# ============================================================
+# 6. 决策日志（decision_log）的语义
+# ============================================================
+# 这张表回答两件事，缺一不可：
+#   ① 回溯：「上周三为什么判 ch_011 该砍」→ 查当时的 value / reason / data_as_of
+#   ② 防抖动：「数据没变，为什么今天改口了」→ 比 snapshot_hash
+#
+# 两个数据源的分工（这是刻意的双写，不是没收拾干净）：
+#   SQLite(data/dim.db)  = 写入端。靠 UNIQUE 约束做行级 UPSERT，
+#                          agent 一天跑多次也只留一条最终结论，毫秒级。
+#   Hive(lab.ods_decision_log) = 台账。分区覆盖，能 join 指标、能聚合、
+#                          能进质量门禁、能跨机器回溯。
+#   写在 SQLite，读去数仓，两边用 max(decided_at) 当水位对账。
+#   跨源事务不存在，所以用「对账断言」代替「事务约束」——做不到原子，就做到可发现。
+decision_log:
+  grain: "obj_type × obj_id × metric × data_as_of"
+  partition_col: data_as_of
+  source_of_truth: "写入走 SQLite，读取走数仓（见 sync_decision_log_iaa.py 的文件头）"
+  fields:
+    decided_at: "判定发生的墙钟时间。同一 data_as_of 被重跑时会更新 → 不能用来排序历史"
+    data_as_of: "这次判定看到的数据截止日。**业务上唯一有序的时间轴**，排序/分区都用它"
+    value: "判定时该指标的值（当前只有 d7_roi，且已剔除未成熟 cohort）"
+    days_sustained: "裸阈值分类连续满足了几天 —— 判「能不能改判」的依据"
+    verdict_streak: "最终结论连续稳定了几天 —— 判「这个结论有多稳」的依据（ADS 层算出）"
+    snapshot_hash: "判定时整份快照的指纹。只用来回答「数据变没变」，不含任何内容"
+    config_version: "当时生效的配置版本（dim_campaign 最近一次 SCD2 变更日）"
+  verdict_enum:
+    sub_channel: [strong, watch, weak, critical]
+    creative: [scale, hold, cut]
+  note: >-
+    days_sustained 和 verdict_streak 不能互相替代，也不该断言两者相等。
+    一个对象可以 days_sustained=5 而 verdict_streak=1 —— 那正是滞回
+    刚刚放行了一次改判的样子（候选状态连续 5 天满足，最终结论才刚变）。
+    如果哪天有人把这两个数当成同一个东西来校验，就会把正常现象判成 bug。
+
+# ============================================================
+# 7. 数据质量断言（DAG 的质量门禁用，读这里的规则去校验）
+# ============================================================
+# 设计要点：断言必须是「能抓出真实故障」的，不是「写个范围看起来很严谨」。
+# 下面每条都对应一个曾经真实发生过的故障类型（见 note）。
+# ============================================================
+data_quality:
+  ods_iaa_user_daily:
+    grain: "uid × 活跃日"
+    partition_col: dt
+    assertions:
+      - check: partition_count_between
+        min: 31
+        max: 400
+        note: "分区数骤降 = 上游只送来一部分天，是最常见的「静默半成品」故障"
+      - check: rows_per_partition_between
+        min: 300000
+        max: 2000000
+        note: "实测 402,020~1,593,555。低于 30 万说明某天事件缺失；高于 200 万说明重复灌数"
+      - check: duplicate_rate_between
+        keys: [uid, dt]
+        min: 0.001
+        max: 0.02
+        note: "ODS 的契约是「原样落地」，重复行必须保留（实测 0.496%）。这里断言的是「脏数据特征没变」——若重复率突然归零，说明摄入层偷偷做了去重，把上游故障掩盖掉了；若超过 2%，说明上游重复故障放大"
+
+  ods_iaa_acquisition_daily:
+    grain: "install_date × campaign × creative × sub_channel"
+    partition_col: dt
+    assertions:
+      - check: partition_count_between
+        min: 31
+        max: 400
+      - check: rows_per_partition_equal
+        value: 451
+        note: "买量表是固定维度组合的笛卡尔积，每天行数必须完全相同。不等就说明维度表塌了"
+
+  dwd_user_daily:
+    grain: "uid × 活跃日（清洗后）"
+    partition_col: dt
+    assertions:
+      - check: partition_count_between
+        min: 31
+        max: 400
+      - check: rows_not_greater_than_ods
+        note: "DWD 是清洗层，行数只能 ≤ ODS。大于说明 join 爆炸了"
+      - check: no_duplicate_grain
+        keys: [uid, dt]
+        note: "去重是 DWD 的职责。ODS 实测 0.496% 重复，DWD 必须是 0 —— 这条断言就是清洗生效的证明"
+
+  dws_cohort_daily:
+    grain: "install_date × campaign × creative × sub_channel × day_offset"
+    partition_col: dt
+    assertions:
+      - check: partition_count_between
+        min: 31
+        max: 400
+      - check: d7_retention_between
+        min: 0.10
+        max: 0.14
+        note: "实测 11.8%。留存是纯业务参数，偏离说明造数或聚合被改坏"
+
+  ads_daily_detail:
+    grain: "install_date × campaign × creative × sub_channel（宽表）"
+    assertions:
+      - check: row_count_equal
+        value: 13981
+        note: "等于买量表总行数。不等说明 ADS 聚合丢组（曾因 WHERE creative_id IS NOT NULL 丢掉 3% 直投流量）"
+      - check: column_count_equal
+        value: 78
+        note: "CREATE TABLE IF NOT EXISTS 对已存在的表是静默空操作，加列不加校验会读到旧 schema。76 → 78 是 2026-10-23 补 d7_retention / d7_ecpm 两个汇总别名，让明细层自包含"
+      - check: non_null
+        columns: [install_date, campaign, sub_channel, installs, spend]
+      - check: d7_roi_between
+        min: 0.20
+        max: 2.00
+        min_spend: 0
+        min_installs: 100
+        note: "实测 0.3131~1.2413。超出这个区间几乎一定是分子分母接错了（比如成本单位是分不是元）。门槛用 min_installs 而不是 min_spend：本表单行 spend 只有 90~790"
+      - check: sum_consistency_across_tables
+        tables: [ads_daily_detail, ads_creative_table, ads_sub_channel_table]
+        metric: spend
+        tolerance: 0.001
+        note: "三张表必须对得上同一个花费总额。对不上 = 有一张表加了过滤条件"
+
+      # ---- 空值来源断言 ----
+      # 为什么需要：D7 类指标有两种「空」，在报表里长得一模一样，含义却完全相反。
+      #   ① 观察窗口没走完 → 真不知道 → 必须为空（写成 0 就是把「不知道」说成「零」）
+      #   ② 计算链断了 → 本该有值却没有 → 是 bug
+      # 只靠人工看数分不出来，所以必须用断言把 ① 的边界钉死。
+      - check: null_only_when
+        column: d7_retention
+        condition: "is_mature_d7 = false"
+        note: "NULL 只允许来自窗口未走完。若成熟 cohort 也出现 NULL，说明是计算 bug 而不是数据不足"
+      - check: null_only_when
+        column: d7_ecpm
+        condition: "is_mature_d7 = false"
+        note: "同上。d7_ecpm 依赖 D7 曝光，没有 D7 窗口就没有这个值"
+      - check: null_only_when
+        column: d7_roi
+        condition: "spend <= 0"
+        note: "d7_roi 与上面两个不同：未成熟 cohort 也有累计回收（只是不满 7 天），所以它几乎不该为空。只有当分母为 0（没有花费，ROI 无定义）时才允许空。注意别把条件写成 cum_rev7 IS NOT NULL —— 那是建表 SQL 的中间别名，不是表里的列，会直接报 UNRESOLVED_COLUMN"
+
+  ads_creative_table:
+    grain: "dim_id（= creative_id）× install_date"
+    note: "聚合表不保留裸列名，业务键统一存在 dim_id 里（crt_ca_a_01_001 这种字符串），另有 1 个 dim_id 为 NULL 的分组承载直投流量"
+    assertions:
+      - check: row_count_equal
+        value: 6231
+        note: "201 个 dim_id × 31 天（201 = 200 个素材 + 1 个 NULL 直投组）"
+      - check: group_count_band
+        column: dim_id
+        min: 200
+        max: 260
+        note: "5 campaign × 40 素材 = 200。dim_id 为 NULL 的分组不计入 DISTINCT，所以下限正好 200"
+
+  ads_sub_channel_table:
+    grain: "dim_id（= sub_channel）× install_date"
+    assertions:
+      - check: row_count_equal
+        value: 341
+        note: "11 个子渠道 × 31 天"
+      - check: group_count_equal
+        column: dim_id
+        value: 11
+
+  # ==========================================================
+  # 日志链路（SQLite → ODS → DWD → ADS）
+  # ==========================================================
+  # 这几张表的断言和指标表不同：它们校验的不是「数值合不合理」，
+  # 而是「入仓有没有忠实」——日志本身没有业务区间可言，
+  # 错的方式只有两种：丢行、改内容。所以断言全部围绕「和源对得上」。
+  ods_decision_log:
+    grain: "obj_type × obj_id × metric × data_as_of（一天一对象一指标只留一条最终结论）"
+    partition_col: data_as_of
+    source: "iaa-analytics-agent/data/dim.db 的 decision_log 表"
+    assertions:
+      - check: row_count_between
+        min: 1
+        max: 200000
+        note: "0 行的后果比想象中严重：滞回依赖「上次结论」，日志空了之后每个对象都退化成首次判定，改判永远不发生 —— 而整条链路不会报任何错"
+      - check: no_duplicate_grain
+        keys: [obj_type, obj_id, metric, data_as_of]
+        note: "重跑产生第二行 = UPSERT 失效。后果是 last_verdicts 取到哪一行取决于 SQL 的执行顺序，判定会随机漂"
+      - check: non_null
+        columns: [decided_at, obj_type, obj_id, metric, verdict, data_as_of]
+      - check: verdict_in_enum
+        column: verdict
+        allowed: [strong, watch, weak, critical, scale, hold, cut]
+        note: "结论写错一个字母（比如 cutt）不会报错，只会让所有按结论分支的逻辑悄悄走到 else"
+      - check: source_parity
+        sqlite: iaa-analytics-agent/data/dim.db
+        table: decision_log
+        date_col: data_as_of
+        keys: [obj_type, obj_id, metric, data_as_of]
+        columns: [verdict, value]
+        note: "两源对账。跨 SQLite 和 Hive 没有事务，这条断言就是事务的替代品：做不到原子，就做到可发现"
+      - check: watermark_lag_days
+        sqlite: iaa-analytics-agent/data/dim.db
+        table: decision_log
+        date_col: data_as_of
+        max: 1
+        note: "数仓的日志最多落后源 1 天（同步在 DAG 里，agent 在它之后跑）。落后更多说明同步任务被跳过或失败但没 fail 掉"
+
+  ads_decision_latest:
+    grain: "obj_type × obj_id × metric（每对象只有一行）"
+    assertions:
+      - check: no_duplicate_grain
+        keys: [obj_type, obj_id, metric]
+      - check: latest_covers_all
+        source_table: ods_decision_log
+        keys: [obj_type, obj_id]
+        note: "ODS 里的每个对象都必须在 latest 里出现。少一个 = 那个对象下次判定时「上次结论」为空，滞回对它静默失效"
+      - check: non_null
+        columns: [obj_id, verdict, snapshot_hash, data_as_of]
+
+  ads_decision_stats:
+    grain: "data_as_of × obj_type × metric × verdict"
+    assertions:
+      - check: no_duplicate_grain
+        keys: [data_as_of, obj_type, metric, verdict]
+      - check: sum_equals_table_count
+        column: n_objects
+        source_table: dwd_decision_event
+        note: "分布表的计数合计必须等于事件流总行数。不等说明分组丢了行（例如 verdict 为 NULL 的组被静默排除）"
+
+  ods_operation_log:
+    grain: "log_id（一次人工/Agent 操作一行）"
+    partition_col: dt
+    source: "iaa-analytics-agent/data/dim.db 的 operation_log 表"
+    assertions:
+      - check: no_duplicate_grain
+        keys: [log_id]
+      - check: non_null
+        columns: [op_time, action]
+        note: "op_time 为空会让这条操作落到哪个分区变成未定义，宁可 fail"
+
+# ============================================================
+# 8. 派生指标「是否入库」约定：只存原子，派生用时算
 # ============================================================
 storage_principle:
   rule: "事实表只存原子字段（installs/active_users/ad_impressions/rewarded_views/ad_revenue/spend/clicks/buy_impressions），派生指标一律不落库，查询时按公式现算"
   reason: "避免口径漂移、节省存储、保证全局一致"
+  exception: "ADS 层是「查询加速层」，允许物化 d7_roi / cpi / is_mature_d7 这类高频派生列 —— 但必须与这里的公式逐字一致，且由 build_ads_iaa.py 单一入口生成"

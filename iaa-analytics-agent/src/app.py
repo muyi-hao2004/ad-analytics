@@ -34,10 +34,13 @@ from pydantic import BaseModel
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
 
+import pandas as pd
+
 import config
 import dim_scd
 import guardrails
 import platform_layer
+import warehouse_api
 import agent
 
 from dotenv import load_dotenv
@@ -183,7 +186,19 @@ def api_adjust_target(req: AdjustTargetReq):
 
 @app.get("/api/logs")
 def api_logs(limit: int = 50):
-    """查操作日志（给前端日志 Tab 用）。"""
+    """查操作日志（给前端日志 Tab 用）。
+
+    读路径统一走 `warehouse_api`，和快照、Agent 工具同源 ——
+    这样「前端看到的操作记录」和「Agent 判断时看到的」不会是两个答案。
+    值里的 NA 统一转 None：pandas 的 NaN 会让 JSON 输出非法的 NaN token。
+    """
+    try:
+        df = warehouse_api.read_operation_log(limit=limit)
+        if df is not None and not df.empty:
+            return {"logs": [{k: (None if pd.isna(v) else v) for k, v in r.items()}
+                             for r in df.to_dict("records")]}
+    except Exception:  # noqa: BLE001
+        pass
     return {"logs": dim_scd.list_logs(limit=limit)}
 
 

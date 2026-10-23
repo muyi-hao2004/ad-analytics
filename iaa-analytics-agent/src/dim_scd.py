@@ -116,6 +116,40 @@ def init_dim_tables() -> None:
             )
         """)
 
+        # 决策日志表：记录「某天对某对象判了什么、依据是什么」
+        #
+        # 为什么单独一张表，而不是塞进 agent_run_history：
+        #   agent_run_history 一行是「一次运行」，结论是一段自然语言，
+        #   想回答「ch_011 上周判了几次、每次都判什么」得把 JSON 全解一遍，
+        #   而且解出来也查不动。决策日志一行是「一个对象 × 一天 × 一个指标」，
+        #   能直接按对象检索、能算连续天数、能靠唯一约束防重。
+        #
+        # UNIQUE 是这张表的核心约束：
+        #   同一天对同一对象同一指标，只允许留一条最终结论。
+        #   agent 一天跑三次（重试 / 手动触发 / 定时），也只会有一行 ——
+        #   这让「写日志」这个动作本身变成幂等的，不需要调用方去重。
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS decision_log (
+                log_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                decided_at     TEXT NOT NULL,     -- 判定时间 YYYY-MM-DD HH:MM:SS
+                data_as_of     TEXT NOT NULL,     -- 当时指标截止到哪天（不是判定时间）
+                obj_type       TEXT NOT NULL,     -- creative / sub_channel
+                obj_id         TEXT NOT NULL,
+                metric         TEXT NOT NULL,     -- d7_roi
+                value          REAL,              -- 判定时该指标的值
+                verdict        TEXT NOT NULL,     -- cut / scale / watch / strong / hold
+                reason         TEXT,              -- 一句话理由（可回溯的关键）
+                days_sustained INTEGER,           -- 该状态已持续多少天（滞回依据）
+                snapshot_hash  TEXT,              -- 判定时数据的指纹
+                config_version TEXT,              -- 当时配置的生效日
+                UNIQUE(obj_type, obj_id, metric, data_as_of)
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_decision_obj
+            ON decision_log(obj_type, obj_id, decided_at DESC)
+        """)
+
         # ---- 轻量迁移 ----
         # 老库里 agent_run_history 已经存在，CREATE TABLE IF NOT EXISTS 不会补列。
         # 这里按 PRAGMA 检查后补，保证已有数据的库也能直接跑起来（不需要手工删库）。
@@ -732,5 +766,125 @@ def list_agent_runs(limit: int = 20, status: Optional[str] = None) -> List[Dict[
             d["usage"] = _json.loads(d.get("usage_json") or "{}")
             result.append(d)
         return result
+    finally:
+        conn.close()
+
+
+# ============================================================
+# 决策日志（decision_log）
+# ============================================================
+# 这张表回答两件事，缺一不可：
+#   ① 回溯：「上周三为什么判 ch_011 该砍」→ 查当时的 value / reason / data_as_of
+#   ② 防抖动：「数据没变，为什么今天改口了」→ 比 snapshot_hash
+#
+# 这两件事不要混为一谈：能回溯靠的是记下了当时的值和理由，
+# 指纹只是贴在记录上的「同一份数据」的凭证，它不含任何内容。
+# ============================================================
+
+def log_decision(obj_type: str, obj_id: str, metric: str, value: Optional[float],
+                 verdict: str, data_as_of: str, reason: str = "",
+                 days_sustained: Optional[int] = None,
+                 snapshot_hash: Optional[str] = None,
+                 config_version: Optional[str] = None) -> int:
+    """写一条决策。同一天同一对象同一指标重复写 == 覆盖，不产生第二行。
+
+    为什么用 UPSERT 而不是 INSERT：agent 一天可能被跑多次（失败重试、
+    手动补跑、定时任务），如果第二条直接报 UNIQUE 冲突，整个 agent 就会
+    因为「日志写不进去」而失败 —— 这是最不该失败的地方。用 ON CONFLICT
+    DO UPDATE 让它变成「记下最新的那次判断」，语义上也更合理。
+
+    Returns:
+        log_id
+    """
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO decision_log
+                   (decided_at, data_as_of, obj_type, obj_id, metric,
+                    value, verdict, reason, days_sustained, snapshot_hash, config_version)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(obj_type, obj_id, metric, data_as_of) DO UPDATE SET
+                   decided_at     = excluded.decided_at,
+                   value          = excluded.value,
+                   verdict        = excluded.verdict,
+                   reason         = excluded.reason,
+                   days_sustained = excluded.days_sustained,
+                   snapshot_hash  = excluded.snapshot_hash,
+                   config_version = excluded.config_version""",
+            (now, data_as_of, obj_type, obj_id, metric, value, verdict,
+             reason, days_sustained, snapshot_hash, config_version),
+        )
+        conn.commit()
+        cur.execute(
+            """SELECT log_id FROM decision_log
+               WHERE obj_type=? AND obj_id=? AND metric=? AND data_as_of=?""",
+            (obj_type, obj_id, metric, data_as_of),
+        )
+        return int(cur.fetchone()[0])
+    finally:
+        conn.close()
+
+
+def last_verdicts(obj_type: Optional[str] = None, metric: str = "d7_roi") -> Dict[str, Dict[str, Any]]:
+    """每个对象**最近一条**决策，按 obj_id 索引。
+
+    只取最近一条而不是全部：快照里要告诉 LLM「上次你判了什么」，
+    一条就够。历史全量由 decision_history 提供。
+    """
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        # 子查询取每个 obj_id 的最近判定时间，再回连取整行。
+        # 不用窗口函数是因为 SQLite 老版本（<3.25）不一定有 ROW_NUMBER。
+        sql = """
+            SELECT d.* FROM decision_log d
+            JOIN (
+                SELECT obj_id, MAX(decided_at) AS m
+                FROM decision_log
+                WHERE metric = :metric
+                  AND (:obj_type IS NULL OR obj_type = :obj_type)
+                GROUP BY obj_id
+            ) t
+              ON d.obj_id = t.obj_id AND d.decided_at = t.m
+            WHERE d.metric = :metric
+              AND (:obj_type IS NULL OR d.obj_type = :obj_type)
+        """
+        cur.execute(sql, {"metric": metric, "obj_type": obj_type})
+        return {r["obj_id"]: dict(r) for r in cur.fetchall()}
+    finally:
+        conn.close()
+
+
+def decision_history(obj_type: str, obj_id: str, metric: str = "d7_roi",
+                     limit: int = 30) -> List[Dict[str, Any]]:
+    """某对象的判定历史（最新在前），用于回溯「它是什么时候被判该砍的」。"""
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT * FROM decision_log
+               WHERE obj_type=? AND obj_id=? AND metric=?
+               ORDER BY data_as_of DESC LIMIT ?""",
+            (obj_type, obj_id, metric, limit),
+        )
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def config_version() -> Optional[str]:
+    """当前配置的生效日期（最近一次 SCD2 变更）。
+
+    快照里要标这个：让「10-24 的指标」和「10-20 生效的配置」这个时间错位
+    显式可见，而不是让 LLM 拿旧配置解释新数据还不自知。
+    """
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT MAX(eff_start_date) m FROM dim_campaign")
+        row = cur.fetchone()
+        return row["m"] if row else None
     finally:
         conn.close()

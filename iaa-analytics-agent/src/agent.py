@@ -21,18 +21,23 @@ Agent 决策核心：快照组装 + 多轮 Function Calling + 决策解析
 
 from typing import List, Dict, Any, Optional
 from pathlib import Path
+import hashlib
 import json
+import math
 import os
 import sys
+from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 import config
+import decision
 import dim_scd
 import guardrails
 import knowledge_base
 import llm_cost
 import semantic_layer
+import warehouse_api
 from dotenv import load_dotenv
 
 load_dotenv(config.PROJECT_ROOT / ".env")
@@ -42,14 +47,303 @@ load_dotenv(config.PROJECT_ROOT / ".env")
 # 1. 快照组装：把数仓结果压缩成 LLM 能读懂的精简 JSON
 # ============================================================
 
-def build_snapshot(top_n: int = 20) -> Dict[str, Any]:
+def snapshot_hash(snapshot: Dict[str, Any]) -> str:
+    """给「数据部分」算一个 8 位指纹。
+
+    刻意**只算指标，不算配置和操作日志**：
+        如果把「当前配置」「最近操作」也算进去，那么改一次预算就会让指纹变，
+        系统会以为「数据更新了，可以重新判断」，于是 LLM 又改一次口 ——
+        这跟防抖动的目标正好相反。指纹的边界必须是「人划定的数据范围」，
+        不是「整个 dict」。
+
+    指纹的用途只有一个：比较两次跑，看到的是不是同一份数据。
+    它不含任何内容，所以不能用来回溯（回溯靠 decision_log 里的值和理由）。
+    """
+    core = {
+        "口径截止": (snapshot.get("数据口径") or {}).get("D7口径截止"),
+        "素材总览": snapshot.get("素材总览"),
+        "素材表现": snapshot.get("素材表现"),
+        "子渠道表现": snapshot.get("子渠道表现"),
+    }
+    # 先清洗再算指纹，顺序不能反。
+    # 踩过的坑：build_snapshot 里先算指纹、后 sanitize，结果「快照里存的指纹」
+    # 和「拿快照重算的指纹」不相等 —— 因为前者依赖 np.float64 之类内存类型
+    # 被 default=str 写成的字符串，后者是纯 Python float。
+    # 指纹的意义就是「可重算校验」，算完就不可复算等于没算。
+    # sanitize 本身是幂等的，所以对已清洗的快照再算一次，结果完全相同。
+    core = sanitize_for_llm(core)
+    raw = json.dumps(core, sort_keys=True, ensure_ascii=False, default=str)
+    canonical = json.dumps(json.loads(raw), sort_keys=True, ensure_ascii=False)
+    return hashlib.md5(canonical.encode("utf-8")).hexdigest()[:8]
+
+
+def _series_by_obj(obj_type: str, days: int = 14) -> Dict[str, List[Dict[str, Any]]]:
+    """取每个对象的逐日 D7 ROI 序列，供判定器使用。
+
+    为什么要从 daily_detail 聚合而不是直接读汇总表：
+        汇总表（creative_table）是「对象 × 装机日」的粒度，没有成熟度标记，
+        尾部 cohort 的 D7 还没产生，会把序列尾巴拉低 —— 判定器据此会误判恶化。
+
+    加权口径：Σ(花费 × ROI) / Σ花费，等价于 Σ回收 / Σ花费。
+        用 sum(min_count=1) 而不是 sum()：全部为 NaN 时 sum() 返回 0，
+        会把「不知道」变成「ROI=0」，这是一个能把渠道直接判死刑的 bug。
+    """
+    df = warehouse_api.read_daily_detail(mature_only=True)
+    dim = "sub_channel" if obj_type == "sub_channel" else "creative_id"
+    if dim not in df.columns or "d7_roi" not in df.columns:
+        return {}
+
+    sub = df[df[dim].notna()].copy()
+    if sub.empty:
+        return {}
+
+    sub["_rev"] = sub["spend"] * sub["d7_roi"]
+    g = (sub.groupby([dim, "install_date"])
+            .agg(spend=("spend", "sum"),
+                 rev=("_rev", lambda s: s.sum(min_count=1)),
+                 n=("d7_roi", "count"))
+            .reset_index())
+
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for oid, grp in g.groupby(dim):
+        grp = grp.sort_values("install_date").tail(days)
+        series = []
+        for r in grp.to_dict(orient="records"):
+            spend = float(r["spend"] or 0)
+            rev = r["rev"]
+            # rev 是 NaN 表示这一天该对象的所有行都没有 D7 值 → 不可观测，记 None
+            value = None if (rev is None or (isinstance(rev, float) and math.isnan(rev)) or spend <= 0) \
+                else float(rev) / spend
+            series.append({"day": str(r["install_date"])[:10], "value": value,
+                           "spend": spend, "rev": 0.0 if value is None else float(rev)})
+        out[str(oid)] = series
+    return out
+
+
+def _prev_verdicts() -> Dict[str, Dict[str, Any]]:
+    """每个对象上一次的判定，按 obj_id 索引。
+
+    **唯一入口**：判定层（喂 previous）和快照（展示「上次结论」）必须用同一份数据。
+    如果一处读数仓、一处读 SQLite，就会出现「判定用的是 A 结论，
+    展示给 LLM 的是 B 结论」——LLM 会据此解释出一套和规则层不一致的说法，
+    而且两边单看都正常，只有把两个输出摆在一起才发现对不上。
+
+    数据源：warehouse_api.read_decision_latest()（数仓为主，agent 刚写完时用 SQLite 增量）。
+    数仓不可用（还没导出过 / 表没建）时退回 SQLite —— 宁可读旧，不能读不到：
+    读不到会让所有对象变成「首次判定」，滞回当天全线失效。
+    """
+    try:
+        df = warehouse_api.read_decision_latest()
+        if df is not None and not df.empty and "metric" in df.columns:
+            df = df[df["metric"] == "d7_roi"]
+            out: Dict[str, Dict[str, Any]] = {}
+            for r in df.to_dict("records"):
+                out[str(r["obj_id"])] = {
+                    "obj_type": r.get("obj_type"),
+                    "verdict": r.get("verdict"),
+                    "value": r.get("value"),
+                    "data_as_of": str(r.get("data_as_of") or "")[:10],
+                    "reason": r.get("reason"),
+                    "snapshot_hash": r.get("snapshot_hash"),
+                    "days_sustained": r.get("days_sustained"),
+                    "verdict_streak": r.get("verdict_streak"),
+                    "_source": df.attrs.get("source", "warehouse"),
+                }
+            if out:
+                return out
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] 数仓日志读取失败，退回 SQLite: {type(e).__name__}: {e}")
+    return dim_scd.last_verdicts(metric="d7_roi")
+
+
+def _log_source_label() -> str:
+    """判定日志这次是从哪读的。写进快照，让人复盘时能对上账。"""
+    try:
+        src = warehouse_api.read_decision_latest().attrs.get("source", "warehouse")
+    except Exception:  # noqa: BLE001
+        return "SQLite（数仓不可用，已降级）"
+    return {
+        "warehouse": "数仓（已同步）",
+        "sqlite(delta)": "SQLite 增量（agent 刚写过，数仓尚未同步）",
+    }.get(str(src), str(src))
+
+
+def _judgements() -> tuple[Dict[str, Any], List[tuple]]:
+    """跑判定层，产出结构化的「建议动作」。
+
+    这是本快照最重要的一块：LLM 不再自己拿数字对着阈值猜，
+    而是拿到一个**已经判好的结论**，它只负责解释和落地。
+    判定是确定性的（同输入必同输出），所以同一个渠道不会今天说观察、
+    明天说关停 —— 抖动在规则层就被吃掉了，不依赖模型的稳定性。
+
+    Returns:
+        (给 LLM 看的展示块, 全量判定行)
+
+        为什么要把「展示」和「全量」分开：
+            素材有 160 个，全塞进快照会吃掉几千 token；但**写进决策日志的必须是全量**。
+            如果只记「改判的 10 个」，那其余 150 个下次跑的时候
+            上次结论是空的，永远判不出「改判」——滞回机制直接失效。
+            展示可以裁剪，状态必须完整。
+    """
+    cfg = semantic_layer.get_hysteresis()
+    enabled = bool(cfg.get("enabled", True))
+    band = float(cfg.get("band_width", 0.04))
+    min_days = int(cfg.get("min_consecutive_days", 3))
+
+    prev = _prev_verdicts()
+    out: Dict[str, Any] = {}
+    all_rows: List[tuple] = []   # 全量判定行，供写日志用（不受展示裁剪影响）
+
+    # 素材的花费门槛：低于这个值的素材样本量不足，ROI 波动主要是噪声。
+    # 不套这个门槛，「建议关停」会多出一批只花了几百块的素材 ——
+    # 那不是结论，那是随机数。（实测：套门槛 47 个 vs 不套 65 个）
+    cr_th = (semantic_layer.get_thresholds("creative") or {})
+    min_spend = float(cr_th.get("min_spend", 0) or 0)
+
+    for obj_type, key in (("sub_channel", "渠道"), ("creative", "素材")):
+        series = _series_by_obj(obj_type)
+        if not series:
+            out[key] = {"状态": "无数据"}
+            continue
+
+        skipped = 0
+        if obj_type == "creative" and min_spend > 0:
+            kept = {}
+            for oid, s in series.items():
+                if sum(x["spend"] for x in s) >= min_spend:
+                    kept[oid] = s
+                else:
+                    skipped += 1
+            series = kept
+
+        previous = {k: v["verdict"] for k, v in prev.items()
+                    if v.get("obj_type") == obj_type}
+        rows = decision.evaluate_all(obj_type, {k: [(x["day"], x["value"]) for x in v]
+                                                for k, v in series.items()},
+                                     previous, band_width=band, min_days=min_days,
+                                     enabled=enabled)
+
+        brief = [{"对象": r["obj_id"],
+                  "当日ROI": r["value"],          # 判定用的就是当日值，不是累计值
+                  "建议": r["verdict"],
+                  "上次": r["previous"], "本次改判": r["changed"],
+                  "被拦原因": r["blocked_by"], "连续天数": r["days_sustained"]}
+                 for r in rows]
+        all_rows.extend((obj_type, b) for b in brief)
+
+        if obj_type == "sub_channel":
+            out[key] = brief
+        else:
+            # 素材有 200 个，全列会吃掉几千 token，且绝大多数没变化。
+            # 只给「改判的」和「最差 10 个」，其余用统计概括。
+            changed = [b for b in brief if b["本次改判"]]
+            out[key] = {
+                "统计": {
+                    "纳入判定": len(brief),
+                    f"已剔除花费不足{int(min_spend)}的素材": skipped,
+                    "建议关停": sum(1 for b in brief if b["建议"] == "cut"),
+                    "建议加预算": sum(1 for b in brief if b["建议"] == "scale"),
+                    "本次改判": len(changed),
+                },
+                "本次改判": changed[:10],
+                "最差 10 个": [b for b in brief if b["建议"] == "cut"][:10],
+            }
+
+    out["规则"] = (
+        f"判定口径：以当日 D7 ROI 为准（不是 31 天累计值，累计值见「子渠道表现」），"
+        f"跨阈值需越过 ±{band / 2:.2f} 的死区，且连续 {min_days} 天落在同一区间才允许改判。"
+        "以上结论由 decision.py 按 metrics.yaml 阈值确定性产出。"
+        "你的职责是解释原因、安排落地顺序，**不要用自己算的数推翻它**；"
+        "若你认为规则本身有问题，明确写出来交给人判断，不要静默改判。"
+    )
+    return out, all_rows
+
+
+def _blank(v) -> bool:
+    """值是不是「等于没填」。
+
+    pandas 的 NA 有不止一种形态（None / float('nan') / pd.NA / pd.NaT），
+    只判 `is None` 会漏掉后三种，于是快照里出现 "old_value": null 这种
+    看起来有值、其实是 NaN 的字段 —— LLM 会以为「这个字段存在但为空」，
+    从而认为操作记录不完整。判空必须一次判干净。
+    """
+    if v is None:
+        return True
+    try:
+        return bool(v != v)          # NaN / NaT 自身不相等
+    except (TypeError, ValueError):
+        return False
+
+
+def _op_records(limit: int = 10) -> List[Dict[str, Any]]:
+    """操作日志 → 一批干净的 dict（NA 一律变 None，可以直接进 JSON）。
+
+    这是操作日志的**唯一读取出口**：快照的「最近操作」、LLM 的 get_logs 工具、
+    趋势叠加的操作标记，全部走这里。
+    以前这三处各写一遍 `dim_scd.list_logs()`，于是日志一入仓就出现
+    「快照读数仓、工具读 SQLite」的分裂 —— 同一时刻两个答案。
+    """
+    try:
+        df = warehouse_api.read_operation_log(limit=limit)
+        if df is not None and not df.empty:
+            return [{k: (None if _blank(v) else v) for k, v in r.items()}
+                    for r in df.to_dict("records")]
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] 数仓操作日志读取失败，退回 SQLite: {type(e).__name__}: {e}")
+    return dim_scd.list_logs(limit=limit)
+
+
+def _recent_operations(limit: int = 10) -> List[Dict[str, Any]]:
+    """最近的操作日志（快照用）。逻辑同 `_op_records`，保留这个名字是为了调用点可读。"""
+    return _op_records(limit)
+
+
+def _last_verdicts_block(snap_hash: str,
+                         only: Optional[set] = None) -> List[Dict[str, Any]]:
+    """上次的判定结论 + 数据变没变。
+
+    这是解决「同一渠道今天说观察、明天说关停」的另一半：
+    光有确定性判定还不够，LLM 还需要知道「我上次说了什么」。
+    它没有记忆，但可以读。
+
+    Args:
+        only: {(obj_type, obj_id)} 白名单。日志里有 170 多条（素材全量），
+            但快照只展示十几个对象 —— 全塞进去会白烧几千 token。
+            **日志写全量、展示只给相关的**，这是两者的分工。
+    """
+    try:
+        rows = _prev_verdicts()
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for obj_id, r in rows.items():
+        if only is not None and (r.get("obj_type"), obj_id) not in only:
+            continue
+        out.append({
+            "对象": obj_id,
+            "上次结论": r.get("verdict"),
+            "当时值": r.get("value"),
+            "判定日期": (r.get("data_as_of") or "")[:10],
+            "数据已变": (r.get("snapshot_hash") or "") != snap_hash,
+            # 理由截断：它是给人看的线索，不是证据。完整理由留在
+            # decision_log 里，需要复盘时查库，不必占快照 token。
+            "当时理由": (r.get("reason") or "")[:40],
+        })
+    return out
+
+
+def build_snapshot(top_n: int = 20, persist: bool = False) -> Dict[str, Any]:
     """
     组装给 LLM 的"日报数据版"快照。
 
-    包含三类信息：
+    包含四类信息：
+      0. 数据口径 —— 截止到哪天、D7 能用到哪天、判读阈值多少（先看这个）
       1. 派生指标（ADS 层）：D7 ROI、留存、eCPM、CPI —— 已经是结论，直接看
       2. 当前配置（维度表）：每个系列的策略、目标值、预算 —— LLM 要知道现状
       3. 最近操作日志：最近调了什么 —— 避免重复调整、知道历史
+
+    口径顺序是有意的：口径放最前，LLM 会先建立「这些数字是怎么来的」的
+    上下文，再去看具体数值。反过来的话，它经常抓到一个数就下结论。
 
     Args:
         top_n: 每个维度最多取多少行（避免 token 爆炸）
@@ -59,78 +353,429 @@ def build_snapshot(top_n: int = 20) -> Dict[str, Any]:
     """
     snapshot: Dict[str, Any] = {}
 
-    # ---- 1.1 派生指标：素材/子渠道前后端表（判断"删不删"的核心）----
+    # ---- 0. 数据口径与判读阈值（必须先给）----
+    snapshot["数据口径"] = _data_context()
+
+    # ---- 1.1 派生指标：素材/子渠道（判断"删不删"的核心）----
+    # 先给总览再给明细：明细只列最差的 20 个，单看会把「个别素材差」
+    # 误读成「全线崩」，总览用来说清这只是尾部还是整体。
+    snapshot["素材总览"] = _creative_overview()
     snapshot["素材表现"] = _load_top("creative_table.parquet", top_n)
     snapshot["子渠道表现"] = _load_top("sub_channel_table.parquet", top_n)
 
-    # ---- 1.2 当前配置：每个系列的策略 + 目标值 + 预算 ----
+    # ---- 1.15 指纹：必须在指标块都建好之后算 ----
+    # 顺序不能反：指纹的定义就是「这几个指标块的内容」，早算会漏块。
+    snap_hash = snapshot_hash(snapshot)
+    snapshot["数据口径"]["快照指纹"] = snap_hash
+    snapshot["数据口径"]["配置读取于"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    cfg_ver = dim_scd.config_version()
+    if cfg_ver:
+        snapshot["数据口径"]["配置生效日"] = cfg_ver
+        snapshot["数据口径"]["配置与指标的关系"] = (
+            "指标截止日与配置生效日是两个独立时间轴。若指标截止日 < 配置生效日，"
+            "说明当前看到的数字还没反映配置改动，别把效果归因于新配置。"
+        )
+    # 把日志的来源也标出来：判定日志现在有两个源（数仓为主 / SQLite 增量），
+    # 不写清楚的话，复盘时会分不清「那天看到的是已同步的结论还是刚写的结论」。
+    snapshot["数据口径"]["判定日志来源"] = _log_source_label()
+
+    # ---- 1.2 判定建议：确定性的结论，LLM 只负责解释 ----
+    judgements, judge_rows = _judgements()
+    snapshot["判定建议"] = judgements
+
+    # ---- 1.3 当前配置：每个系列的策略 + 目标值 + 预算 ----
     snapshot["当前配置"] = _current_config()
 
-    # ---- 1.3 最近操作日志（最近 10 条）----
-    snapshot["最近操作"] = dim_scd.list_logs(limit=10)
+    # ---- 1.4 最近操作日志（最近 10 条）----
+    # 只投影有用的字段：原表 12 列里有 4 列常年为 null（app/channel/campaign_id/country），
+    # 全量塞进去白占约 40% 的体积，还会让 LLM 以为「这些字段有值只是没填」。
+    snapshot["最近操作"] = [
+        {k: v for k, v in {kk: r.get(kk) for kk in
+                           ("op_time", "operator", "action", "field",
+                            "old_value", "new_value", "reason")}.items()
+         if not _blank(v)}
+        for r in _recent_operations(10)
+    ]
 
-    # ---- 1.4 业务红线（LLM 判断"要不要优化"的基准）----
+    # ---- 1.5 上次结论（解决「每天从零判断」）----
+    # 白名单与「判定建议」展示的对象保持一致：日志全量，展示只给这次要看的
+    shown = {("sub_channel", r["对象"]) for r in (judgements.get("渠道") or [])}
+    _cr = judgements.get("素材")
+    if isinstance(_cr, dict):
+        for r in (_cr.get("本次改判") or []) + (_cr.get("最差 10 个") or []):
+            shown.add(("creative", r["对象"]))
+    last = _last_verdicts_block(snap_hash, only=shown)
+    if last:
+        snapshot["上次结论"] = last
+        snapshot["上次结论说明"] = (
+            "「数据已变=false」表示本次看到的指标与上次判定时完全相同，"
+            "应沿用上次结论并说明原因，不要重新判断出不同结果。"
+            "「数据已变=true」才是允许改判的前提（还要满足连续确认天数）。"
+        )
+
+    # ---- 1.6 业务红线（LLM 判断"要不要优化"的基准）----
     snapshot["业务目标"] = {
         "D7_ROAS_目标": f"{config.D7_ROAS_TARGET:.0%}",
         "说明": "D7 ROI 低于该值说明变现效率不足，需要优化",
     }
 
-    return snapshot
+    result = sanitize_for_llm(snapshot)
+
+    if persist:
+        _persist_decisions(judge_rows, snap_hash, cfg_ver,
+                           (snapshot.get("数据口径") or {}).get("D7口径截止") or "")
+
+    return result
+
+
+def _persist_decisions(rows: List[tuple], snap_hash: str,
+                       cfg_ver: Optional[str], as_of: str) -> None:
+    """把本次判定写进 decision_log。
+
+    为什么单独一个函数而不是塞进 build_snapshot 的主流程：
+        快照会被反复构建（调试、界面展示、单测），如果构建即写库，
+        调试一次就污染一次决策历史。写库必须是**显式**的动作，
+        由 run_agent 在真正跑完一轮之后调用。
+
+    为什么必须写全量（不只是快照里展示的那几条）：
+        滞回和「改判判定」都依赖「上次的结论」。只记一部分对象，
+        其余对象下次就是「首次判定」，永远看不出变化 —— 机制形同虚设。
+
+    幂等性由表上的 UNIQUE(obj_type, obj_id, metric, data_as_of) 保证：
+    同一天跑十次也只会留一条最终结论，不需要调用方去重。
+    """
+    written = 0
+    for obj_type, item in rows:
+        oid = item.get("对象")
+        if not oid:
+            continue
+        try:
+            dim_scd.log_decision(
+                obj_type=obj_type, obj_id=oid, metric="d7_roi",
+                value=item.get("当日ROI"), verdict=item.get("建议") or "unknown",
+                data_as_of=as_of, reason=_reason_of(item),
+                days_sustained=item.get("连续天数"),
+                snapshot_hash=snap_hash, config_version=cfg_ver,
+            )
+            written += 1
+        except Exception as e:  # noqa: BLE001
+            print(f"[warn] 决策日志写入失败 {obj_type}/{oid}: {type(e).__name__}: {e}")
+    print(f"[decision] 写入决策 {written} 条（data_as_of={as_of}, 指纹={snap_hash}）")
+
+
+def _reason_of(item: Dict[str, Any]) -> str:
+    """把判定结果拼成一句可回溯的理由。回溯靠这句，不靠指纹。"""
+    parts = [f"当日ROI {item.get('当日ROI')}"]
+    if item.get("上次") and item.get("建议") != item.get("上次"):
+        parts.append(f"{item.get('上次')} → {item.get('建议')}")
+    else:
+        parts.append(f"维持 {item.get('建议')}")
+    if item.get("连续天数"):
+        parts.append(f"连续 {item.get('连续天数')} 天")
+    if item.get("被拦原因") == "dead_band":
+        parts.append("本应改判但落在死区，暂不动")
+    return "；".join(parts)
+
+
+def _data_context() -> Dict[str, Any]:
+    """快照的元信息：数据截止在哪、D7 口径能用到哪天、判读阈值是多少。
+
+    为什么必须给 LLM 这块：
+        LLM 最容易犯的错是「拿着一个数字直接下结论」，不问这个数字怎么算的。
+        没有这块信息，它会做两件错事：
+
+          1. 把 10-31 的 D7 ROI（0.36）和 10-24 的（0.73）直接比，
+             得出「渠道急剧恶化，建议停投」—— 其实只是窗口没走完。
+          2. 拿 0.65 去比「感觉合理」的线，而不是比语义层定义的目标，
+             于是同一个渠道在不同回答里被判成不同结果。
+
+        给了这块，它才能自己判断：这条数据够不够新、该拿哪个阈值比。
+    """
+    ctx: Dict[str, Any] = {}
+
+    try:
+        df = warehouse_api.read_daily_detail()
+        first = str(df["install_date"].min())[:10]
+        last = str(df["install_date"].max())[:10]
+        ctx["数据范围"] = f"{first} ~ {last}"
+
+        if "is_mature_d7" in df.columns:
+            mature = df[df["is_mature_d7"]]
+            if not mature.empty:
+                mature_last = str(mature["install_date"].max())[:10]
+                ctx["D7口径截止"] = mature_last
+                ctx["成熟度说明"] = (
+                    f"D7 类指标（d7_roi / d7_retention / d7_ecpm）只统计"
+                    f"「装机日 + 7 天 ≤ {last}」的 cohort，因此只有 {mature_last} "
+                    f"及之前的装机日可用。之后的 D7 值是窗口未走完的中间值，"
+                    f"系统性偏低，**不能用来判断对象变好还是变差**。"
+                )
+    except Exception as e:
+        ctx["数据范围加载失败"] = f"{type(e).__name__}: {e}"
+
+    th = semantic_layer.get_thresholds()
+    if isinstance(th, dict) and "error" not in th:
+        ch = th.get("channel") or {}
+        cr = th.get("creative") or {}
+        # 阈值在 YAML 里是「分界点」（watch 和 weak 恰好同为 0.62），
+        # 直接摊给 LLM 会出现两个同样的数字挂在不同的判读名下 —— 它会困惑。
+        # 这里转成「区间 → 结论」，因为 LLM 需要的是「0.65 算好还是不好」，
+        # 不是一堆分界点自己去推。
+        if ch:
+            ctx["渠道判读（D7 ROI）"] = [
+                {"区间": f"≥ {ch.get('strong')}", "判定": "达标，可加预算"},
+                {"区间": f"{ch.get('watch')} ~ {ch.get('strong')}", "判定": "临界，观察不动作"},
+                {"区间": f"{ch.get('critical')} ~ {ch.get('weak')}", "判定": "不达标，需优化"},
+                {"区间": f"< {ch.get('critical')}", "判定": "严重，建议降预算"},
+            ]
+        if cr:
+            min_spend = cr.get("min_spend")
+            ctx[f"素材判读（D7 ROI，且累计花费 > {min_spend}）"] = [
+                {"区间": f"≥ {cr.get('scale')}", "判定": "建议加预算"},
+                {"区间": f"{cr.get('cut')} ~ {cr.get('scale')}", "判定": "保持观察"},
+                {"区间": f"< {cr.get('cut')}", "判定": "建议关停"},
+            ]
+            ctx["样本不足不下结论"] = (
+                f"累计花费 ≤ {min_spend} 的素材样本量不够，"
+                f"ROI 波动主要是噪声，不要据此建议关停或加预算。"
+            )
+        ctx["阈值来源"] = "语义层 metrics.yaml decision_thresholds，改阈值只改那里，不要改代码"
+
+    return ctx
+
+
+def _creative_overview() -> Dict[str, Any]:
+    """素材整体分布摘要：有多少个、分位数、各档位各多少个。
+
+    为什么必须有这块：
+        snapshot["素材表现"] 只返回**最差的 20 个**（设计如此 —— 优化要看
+        最该动的）。但 LLM 单独看那 20 行，看到的 ROI 全在 0.31~0.45，
+        很容易得出「所有素材都不达标，建议全部关停」—— 而它根本没看到
+        还有 ROI 1.24 的素材。
+
+        有了总览，它才能回答「这是个别素材的问题，还是整体在恶化」，
+        而这是完全不同量级的决策：换 3 个素材 vs 停一个 campaign。
+
+        另外「样本不足未纳入」也要显式说：花费太低的素材 ROI 波动纯属噪声，
+        如果不说，LLM 会从 200 个里挑出几个高 ROI 的低花费素材建议加预算。
+    """
+    dim_col = "creative_id"
+    try:
+        df = warehouse_api.read_daily_detail(mature_only=True)
+    except (FileNotFoundError, ValueError):
+        return {}
+
+    if dim_col not in df.columns:
+        return {}
+    df = df[df[dim_col].notna()]
+    if df.empty:
+        return {}
+
+    spend = df.groupby(dim_col)["spend"].sum()
+    roi = ((df["spend"] * df["d7_roi"]).groupby(df[dim_col]).sum()
+           / spend.where(spend > 0)).dropna()
+    if roi.empty:
+        return {}
+
+    cr = semantic_layer.get_thresholds("creative")
+    if not isinstance(cr, dict) or "error" in cr:
+        cr = {}
+    min_spend = cr.get("min_spend", 5000)
+    cut, scale = cr.get("cut"), cr.get("scale")
+
+    eligible = roi[spend.reindex(roi.index) > min_spend]
+    if eligible.empty:
+        return {}
+
+    out: Dict[str, Any] = {
+        "纳入统计": int(len(eligible)),
+        "样本不足未纳入": int(len(roi) - len(eligible)),
+        "样本门槛_累计花费": min_spend,
+        "P10": round(float(eligible.quantile(0.10)), 4),
+        "P50": round(float(eligible.quantile(0.50)), 4),
+        "P90": round(float(eligible.quantile(0.90)), 4),
+        "最低": round(float(eligible.min()), 4),
+        "最高": round(float(eligible.max()), 4),
+    }
+    if cut is not None:
+        out[f"低于关停线（{cut}）的个数"] = int((eligible < cut).sum())
+    if scale is not None:
+        out[f"高于加预算线（{scale}）的个数"] = int((eligible >= scale).sum())
+    out["说明"] = ("素材表现只列出最差的 20 个，不代表全部；"
+                   "判断是「个别素材差」还是「整体恶化」请看这块。")
+    return out
+
+
+# ============================================================
+# 给 LLM 的数据整形：精度 + 空值
+# ============================================================
+# 为什么需要这一层，而不是直接把 DataFrame 丢过去：
+#
+#   1. 精度是浮点噪声，不是业务信息
+#      pandas 读出来是 0.28853533219904687，LLM 会「引用」这个数字，
+#      让回答显得很精确 —— 但后 12 位全是 IEEE754 尾巴。
+#      6k 行的快照里，每个数字多省 10 个字符就是几万 token。
+#
+#   2. NaN 不是合法 JSON
+#      json.dumps 默认 allow_nan=True，会把 NaN 写成裸的 NaN token。
+#      OpenAI 兼容接口收到会 400，而且报错信息通常只说「非法 JSON」，
+#      不会告诉你是哪个字段 —— 排查成本远高于在这里挡掉。
+#      业务上 NaN 的含义也很明确：分母为 0（比如当天停投、花费为 0），
+#      显式输出 null 让 LLM 知道「这里没数据」，比让它自己猜好。
+#
+#   3. 类型不一致
+#      numpy 标量不继承 Python int，json.dumps 会走 default=str，
+#      于是 44993 变成 "44993" 字符串，LLM 没法做数值比较。
+
+_ROI_HINTS = ("roi", "rate", "ctr", "cvr", "retention", "ratio", "lift", "share")
+_MONEY_HINTS = ("spend", "revenue", "cost", "cpi", "ecpm", "budget", "price", "arpu")
+
+
+def _clean_scalar(key: str, v: Any) -> Any:
+    """单个值：NaN/inf/NA → None，浮点按语义截断精度，numpy 标量转原生类型。"""
+    if v is None or isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v
+    if isinstance(v, int) and not isinstance(v, bool):
+        return v
+
+    # pandas 的 pd.NA / NaT：float() 会抛 TypeError，但它们语义上就是「空」。
+    # 不特判的话会原样漏到 json.dumps 里变成非法 JSON —— 而这一步正是
+    # 用来兜住这种漏网的。用类名判断而不是 import pandas，避免在热路径引入依赖。
+    if v.__class__.__name__ in ("NAType", "NaTType"):
+        return None
+
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return v                       # date / Decimal / 其他交给调用方或 default=str
+
+    if math.isnan(f) or math.isinf(f):
+        return None
+
+    k = (key or "").lower()
+    if any(h in k for h in _ROI_HINTS):
+        return round(f, 4)
+    if any(h in k for h in _MONEY_HINTS):
+        return round(f, 2)
+    return int(f) if f.is_integer() else round(f, 2)
+
+
+def sanitize_for_llm(obj: Any, key: str = "") -> Any:
+    """递归清洗任意结构，保证 json.dumps 能产出合法 JSON。
+
+    用于所有回传给 LLM 的快照和工具结果。dict 的 key 会作为精度提示
+    （roi_* 保留 4 位，spend/cost 类保留 2 位，计数类还原成整数）。
+    """
+    if isinstance(obj, dict):
+        return {k: sanitize_for_llm(v, k) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [sanitize_for_llm(v, key) for v in obj]
+    return _clean_scalar(key, obj)
+
+
+def _round_records(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """记录列表的精度截断 + NaN 清洗（sanitize_for_llm 的列表版）。"""
+    return [sanitize_for_llm(r) for r in rows]
+
+
+def _to_llm_content(obj: Any) -> str:
+    """把任意结构序列化成**合法 JSON 字符串**，用于回传 LLM。
+
+    用 allow_nan=False 而不是默认值，是为了让「漏网的 NaN」立刻暴露成异常，
+    而不是悄悄生成 `NaN` 这种非 JSON token —— 后者会被上游以
+    「invalid JSON」笼统拒绝，排查时根本不知道是哪个字段。
+
+    但这里不把异常抛给调用方：一个字段序列化失败不该让整轮分析崩掉。
+    降级成一条带错误信息的记录，LLM 至少能看到「这里有问题」，
+    而 trace 里也留着原始对象可供定位。
+    """
+    clean = sanitize_for_llm(obj)
+    try:
+        return json.dumps(clean, ensure_ascii=False, allow_nan=False, default=str)
+    except (ValueError, TypeError) as e:
+        return json.dumps({
+            "_serialize_error": f"{type(e).__name__}: {e}",
+            "_preview": str(clean)[:500],
+        }, ensure_ascii=False)
+
+
+_DIM_BY_FILENAME = {
+    "creative_table.parquet": "creative_id",
+    "sub_channel_table.parquet": "sub_channel",
+    "creative_table": "creative_id",
+    "sub_channel_table": "sub_channel",
+}
 
 
 def _load_top(filename: str, top_n: int) -> List[Dict[str, Any]]:
     """
-    读 ADS 层 parquet，按「维度ID」聚合后取 Top N（最差的排前面）。
+    从 ADS 明细层聚合出「最差的 Top N」，供快照使用。
 
-    为什么聚合：ADS 层每个维度 ID 有多个 install_date 的行（比如一个素材有 8 天的数据）。
-    如果不聚合直接 head(top_n)，取到的会是同一个 ID 的不同日期，把其他维度全挤掉，
-    导致 LLM 只看得到一个素材/子渠道。
+    为什么不再读 creative_table.parquet / sub_channel_table.parquet：
+        这两张是 DWS 全量表，聚合了全部 31 天，**没有 is_mature_d7 列**。
+        但最后 7 天装机的用户只观察到 D0，D7 收入还没产生，分母（成本）
+        却是全额 —— 每个对象的 D7 ROI 都被系统性稀释。
 
-    聚合逻辑：
-      - 同一维度 ID 的多天数据汇总 spend / installs 等
-      - D7 ROI 用「总回收 / 总花费」重新加权，而不是简单平均
-      - 按加权 ROI 升序排，最该优化的排最前
+        实测（31 天 / 200 个素材 / 花费 > 5000）：
+            全量口径 0.2885 ~ 1.1401
+            成熟口径 0.3131 ~ 1.2413
+            100% 的素材被低估，均值 -0.0529
+
+        后果不是小数误差，是决策错误：
+            按 cut 阈值 0.50 判断，全量口径判「该砍」65 个，
+            成熟口径只有 47 个 —— **18 个素材会被误砍**；
+            按 scale 阈值 0.90，「该加预算」漏掉 4 个。
+
+        所以快照必须和工具调用共用同一口径：read_daily_detail(mature_only=True)。
+
+    为什么聚合：ADS 明细层每个维度 ID 有多个 install_date 的行。
+    不聚合直接 head(top_n) 会取到同一个 ID 的不同日期，把其他维度全挤掉，
+    导致 LLM 只看得到一个素材。
+
+    Args:
+        filename: 兼容旧调用点，仅用于确定维度列
+        top_n:    最多返回多少行（避免 token 爆炸）
+
+    Returns:
+        按加权 D7 ROI 升序的记录，最该优化的排最前
     """
     import pandas as pd
-    path = config.ADS_DIR / filename
-    if not path.exists():
+
+    dim_col = _DIM_BY_FILENAME.get(filename)
+    if dim_col is None:
         return []
-    df = pd.read_parquet(path)
 
-    # 确定维度 ID 列名（素材表是 creative_id，子渠道表是 sub_channel）
-    if "creative_id" in df.columns:
-        dim_col = "creative_id"
-    elif "sub_channel" in df.columns:
-        dim_col = "sub_channel"
-    else:
-        return df.head(top_n).to_dict(orient="records")
+    try:
+        df = warehouse_api.read_daily_detail(mature_only=True)
+    except (FileNotFoundError, ValueError):
+        return []
 
-    agg: Dict[str, Any] = {dim_col: "first"}
-    sum_cols = ["spend", "clicks", "buy_impressions", "installs"]
-    for c in sum_cols:
-        if c in df.columns:
-            agg[c] = "sum"
+    if dim_col not in df.columns or "d7_roi" not in df.columns:
+        return []
 
-    grouped = df.groupby(dim_col, as_index=False).agg(agg)
+    df = df[df[dim_col].notna()]
+    if df.empty:
+        return []
 
-    # D7 ROI 用「回收/花费」重新加权：回收额 ≈ spend * d7_roi（按天加权求和 / 总花费）
-    if "d7_roi" in df.columns and "spend" in df.columns:
-        df = df.copy()
-        df["_rev"] = df["spend"] * df["d7_roi"]          # 每天回收额
-        rev = df.groupby(dim_col)["_rev"].sum()
-        spend = df.groupby(dim_col)["spend"].sum()
-        grouped["d7_roi"] = grouped[dim_col].map(rev / spend)   # 加权 ROI
-    elif "d7_roi" in df.columns:
-        grouped["d7_roi"] = df.groupby(dim_col)["d7_roi"].mean()
+    # 向量化聚合。不用 apply：13k 行 × 6k 组，apply 会慢一个量级
+    spend = df.groupby(dim_col)["spend"].sum()
+    grouped = pd.DataFrame({
+        "spend": spend,
+        "installs": df.groupby(dim_col)["installs"].sum(),
+        # 加权 ROI = 总回收 / 总花费，不是每日 ROI 的简单平均
+        "d7_roi": (df["spend"] * df["d7_roi"]).groupby(df[dim_col]).sum() / spend.where(spend > 0),
+        # 只有 D7 已成熟的 cohort 才计入，这个天数是「有效观测天数」
+        "mature_days": df.groupby(dim_col)["install_date"].nunique(),
+    })
+    if "clicks" in df.columns:
+        grouped["clicks"] = df.groupby(dim_col)["clicks"].sum()
 
-    # 带一个「近 N 天累计」标记，方便 LLM 理解这是多天汇总
-    grouped["days"] = df.groupby(dim_col)["install_date"].nunique().values
+    grouped = grouped.reset_index()
+    grouped = grouped.sort_values("d7_roi", ascending=True, na_position="last")
 
-    # 按加权 ROI 升序，最差的排前面
-    if "d7_roi" in grouped.columns:
-        grouped = grouped.sort_values("d7_roi", ascending=True)
-
-    return grouped.head(top_n).to_dict(orient="records")
+    return _round_records(grouped.head(top_n).to_dict(orient="records"))
 
 
 def _current_config() -> List[Dict[str, Any]]:
@@ -183,22 +828,9 @@ def _get_channel_installs(sub_channel: str) -> Optional[int]:
     """
     if not sub_channel:
         return None
-    try:
-        import pandas as pd
-        path = config.ADS_DIR / "sub_channel_table.parquet"
-        if not path.exists():
-            return None
-        df = pd.read_parquet(path)
-        if "sub_channel" not in df.columns or "installs" not in df.columns:
-            return None
-        rows = df[df["sub_channel"] == sub_channel]
-        if rows.empty:
-            return None
-        return int(rows["installs"].sum())
-    except Exception:
-        # 读不到就当「查不到」，让护栏 fail-closed。绝不能吞掉异常返回 0，
-        # 那等于告诉护栏「这个渠道没有量」，反而可能放行删除。
-        return None
+    # 取数细节收口到 warehouse_api。这里保留「None 表示查不到」的语义 ——
+    # 绝不能吞掉异常返回 0，那等于告诉护栏「这个渠道没有量」，反而可能放行删除。
+    return warehouse_api.get_channel_installs(sub_channel)
 
 
 def _get_channel_observed_days(sub_channel: str) -> Optional[int]:
@@ -215,20 +847,8 @@ def _get_channel_observed_days(sub_channel: str) -> Optional[int]:
     """
     if not sub_channel:
         return None
-    try:
-        import pandas as pd
-        path = config.ADS_DIR / "sub_channel_table.parquet"
-        if not path.exists():
-            return None
-        df = pd.read_parquet(path)
-        if "sub_channel" not in df.columns or "install_date" not in df.columns:
-            return None
-        rows = df[df["sub_channel"] == sub_channel]
-        if rows.empty:
-            return None
-        return int(pd.to_datetime(rows["install_date"]).nunique())
-    except Exception:
-        return None
+    # 和 _get_channel_installs 一样，取数收口到 warehouse_api，语义保持不变。
+    return warehouse_api.get_channel_observed_days(sub_channel)
 
 
 # ============================================================
@@ -503,37 +1123,108 @@ def _tool_get_metric(obj_type: str, obj_id: str, metric: str,
 
     参数化：靠 obj_type 区分查素材还是子渠道，metric 区分查哪个指标，
     一个函数覆盖「对象×指标」的无限组合，而不是为每种组合写一个函数。
+
+    口径处理（和 get_trend_with_ops 不同，这是故意的）：
+        get_trend_with_ops 直接**剔除**不成熟 cohort —— 它要判趋势和因果，
+        混进窗口不完整的数据必然得出错误结论。
+
+        本工具**保留**全部日期，但给每行打 is_mature 标记，并在顶层补
+        mature_hint。理由：LLM 调它通常是想「看最新发生了什么」，
+        直接删掉最近 7 天等于没回答。让它看到真实数字 + 明确知道
+        「这段还没成熟」，比让它以为渠道崩了要好。
+
+        早期版本读的是 creative_table / sub_channel_table（DWS 全量表，
+        没有 is_mature_d7 列），连标记都做不了 —— 现在统一走明细层。
     """
-    import pandas as pd
     if obj_type == "creative":
-        path = config.ADS_DIR / "creative_table.parquet"
         dim_col = "creative_id"
     elif obj_type == "sub_channel":
-        path = config.ADS_DIR / "sub_channel_table.parquet"
         dim_col = "sub_channel"
     else:
         return {"error": f"未知对象类型 {obj_type}，只支持 creative/sub_channel"}
 
-    if not path.exists():
+    try:
+        df = warehouse_api.read_daily_detail()
+    except (FileNotFoundError, ValueError):
         return {"error": "数据表不存在"}
 
-    df = pd.read_parquet(path)
-    sub = df[df[dim_col] == obj_id].sort_values("install_date")
-    if sub.empty:
-        return {"error": f"未找到 {obj_id} 的数据"}
+    if dim_col not in df.columns:
+        return {"error": f"数据表缺少维度列 {dim_col}"}
 
-    # 取最近 days 天
-    sub = sub.tail(days)
-    # 返回「日期 → 指标值」的列表，方便 LLM 看趋势
-    series = [{"date": r["install_date"], metric: r.get(metric)}
-              for r in sub.to_dict(orient="records")]
-    return {"obj_type": obj_type, "obj_id": obj_id, "metric": metric,
-            "data": series}
+    sub = df[df[dim_col] == obj_id]
+    if sub.empty:
+        return {"error": f"未找到 {obj_id} 的数据",
+                "hint": "确认 ID 拼写；可用 get_top_history 看当前有哪些 ID"}
+
+    if metric not in sub.columns:
+        measurable = [c for c in sub.columns
+                      if c in ("d7_roi", "cpi", "spend", "installs",
+                               "d7_retention", "d7_ecpm")
+                      or c.startswith(("roi_", "ret_", "ecpm_"))]
+        return {"error": f"指标 {metric} 不存在", "available": measurable}
+
+    # daily_detail 的粒度是「装机日 × app × country × campaign × 素材 × 渠道」，
+    # 比「对象 × 日」更细 —— 同一个渠道同一天会有多行。
+    # 不聚合直接 tail(days) 会返回同一天的若干行，LLM 会当成不同日期的数据，
+    # 看到「ROI 从 0.35 跳到 0.48」这种根本不存在的波动。
+    #
+    # 聚合口径：
+    #   · 求和类（spend / installs）→ 直接相加
+    #   · 比率类（d7_roi / roi_n / ret_n / ecpm_n）→ 按花费加权
+    #     加权 ROI = Σ(spend × roi) / Σspend，正好等于 Σ回收 / Σ花费
+    #   · 其余 → 算术平均
+    #
+    # NULL 必须保持 NULL，不能变成 0 —— 这是 ADS 建表时特意区分过的语义：
+    #   d7_retention 在「观察窗口没走完」时是 NULL（不知道），
+    #   只有「窗口走完但 D7 真的没记录」才是 0（用户全流失）。
+    #   pandas 的 sum() 会跳过 NaN，如果不显式判断，一天全是 NULL 会被算成
+    #   0.0/总花费 = 0.0，于是 LLM 看到「D7 留存归零，用户全跑了」——
+    #   而真相只是「还没到能看的时候」。
+    _SUM_COLS = {"spend", "installs", "clicks", "buy_impressions",
+                 "impressions", "conversions", "views"}
+
+    series = []
+    for d, g in sub.groupby("install_date"):
+        row: Dict[str, Any] = {"date": str(d)[:10]}
+        valid = g[metric].notna()
+
+        if valid.sum() == 0:
+            row[metric] = None                        # 整天无法计算 → 保持未知
+        elif metric in _SUM_COLS:
+            row[metric] = float(g[metric].sum())
+        else:
+            # 只用有效行参与加权，否则 NULL 行的花费会稀释分子
+            w = g[valid]
+            w_spend = float(w["spend"].sum()) if "spend" in w.columns else 0.0
+            if w_spend > 0:
+                row[metric] = float((w[metric] * w["spend"]).sum() / w_spend)
+            else:
+                row[metric] = float(w[metric].mean())
+
+        if "is_mature_d7" in g.columns:
+            # 同一天的多行 maturity 一定相同（只由装机日决定），all() 只是防御
+            row["is_mature"] = bool(g["is_mature_d7"].all())
+        series.append(row)
+
+    series = series[-days:]
+    out: Dict[str, Any] = {"obj_type": obj_type, "obj_id": obj_id,
+                           "metric": metric, "data": series}
+
+    n_immature = sum(1 for x in series if x.get("is_mature") is False)
+    if n_immature:
+        dates = [x["date"] for x in series if x.get("is_mature") is False]
+        out["mature_hint"] = (
+            f"最后 {n_immature} 天（{dates[0]} ~ {dates[-1]}）is_mature=false："
+            f"这些 cohort 的 D7 观察窗口还没走完，D7 类指标"
+            f"（d7_roi / d7_retention / d7_ecpm）会系统性偏低，"
+            f"不能据此判断对象变差。判趋势请用 get_trend_with_ops（它已剔除不完整 cohort）。"
+        )
+    return sanitize_for_llm(out)
 
 
 def _tool_get_logs(keyword: str, limit: int = 10) -> Dict[str, Any]:
     """按关键词查操作日志，判断对象是否被操作过。"""
-    logs = dim_scd.list_logs(limit=100)
+    logs = _op_records(100)
     # 模糊匹配：campaign_id / field / old_value / new_value 任一包含关键词
     matched = [l for l in logs
                if keyword and (keyword in str(l.get("campaign_id") or "")
@@ -559,44 +1250,47 @@ def _tool_get_top_history(dim: str = "sub_channel", metric: str = "d7_roi",
         top_n: 返回头部 N 个 + 尾部 N 个（默认各 5 个）
     """
     import pandas as pd
-    path = config.ADS_DIR / "daily_detail.parquet"
-    if not path.exists():
+
+    # 排行是要拿来做决策的（该砍哪个渠道、该给谁加预算），必须用成熟的 cohort。
+    # 用全量口径时 ch_008 算出来 0.829，用成熟口径是 0.873 —— 而快照里
+    # 用的是后者。两个数字同时出现在一次对话里，LLM 会不知道该信哪个。
+    try:
+        df = warehouse_api.read_daily_detail(mature_only=True)
+    except (FileNotFoundError, ValueError):
         return {"error": "daily_detail 数据不存在"}
 
-    df = pd.read_parquet(path)
     if dim not in df.columns:
         return {"error": f"维度 {dim} 不存在，可选: app/sub_channel/creative_id/campaign/country"}
     if metric not in df.columns:
         return {"error": f"指标 {metric} 不存在，可选: d7_roi/spend/installs/cpi"}
 
-    # 按维度聚合：spend/installs 求和，d7_roi 用「总回收/总花费」加权
-    agg = {"spend": "sum", "installs": "sum"}
-    agg = {k: v for k, v in agg.items() if k in df.columns}
-    grouped = df.groupby(dim, as_index=False).agg(agg)
+    spend = df.groupby(dim)["spend"].sum()
+    installs = df.groupby(dim)["installs"].sum()
+    grouped = pd.DataFrame({"spend": spend, "installs": installs})
 
-    if metric == "d7_roi" and "spend" in df.columns and "d7_roi" in df.columns:
-        df = df.copy()
-        df["_rev"] = df["spend"] * df["d7_roi"]
-        rev = df.groupby(dim)["_rev"].sum()
-        spend = df.groupby(dim)["spend"].sum()
-        grouped["d7_roi"] = grouped[dim].map(rev / spend)
-    elif metric in df.columns and metric not in ("spend", "installs"):
+    # 比率指标必须用「总量相除」，不能对每日值取平均 ——
+    # 一个花费 10 万的渠道和一个花费 1000 的渠道，简单平均会让后者权重一样大。
+    if metric == "d7_roi":
+        grouped["d7_roi"] = ((df["spend"] * df["d7_roi"]).groupby(df[dim]).sum()
+                             / spend.where(spend > 0))
+    elif metric == "cpi":
+        grouped["cpi"] = spend / installs.where(installs > 0)
+    elif metric not in ("spend", "installs"):
         grouped[metric] = df.groupby(dim)[metric].mean()
 
-    # 加天数（该维度出现在多少天）
-    grouped["days"] = df.groupby(dim)["install_date"].nunique().values
+    # 有效观测天数（只用成熟 cohort，所以是「可比较的天数」而非自然天数）
+    grouped["mature_days"] = df.groupby(dim)["install_date"].nunique()
 
-    # 排序取头部/尾部
-    if metric in grouped.columns:
-        grouped = grouped.sort_values(metric, ascending=False)
-    else:
-        grouped = grouped.sort_values("spend", ascending=False)
+    grouped = grouped.reset_index()
+    sort_col = metric if metric in grouped.columns else "spend"
+    grouped = grouped.sort_values(sort_col, ascending=False, na_position="last")
 
-    top = grouped.head(top_n).to_dict(orient="records")
-    bottom = grouped.tail(top_n).to_dict(orient="records")
+    top = _round_records(grouped.head(top_n).to_dict(orient="records"))
+    bottom = _round_records(grouped.tail(top_n).to_dict(orient="records"))
 
     return {
         "dim": dim, "metric": metric,
+        "口径": "仅统计 D7 观察窗口完整的 cohort",
         "头部": top,      # 表现最好的（d7_roi 最高 / spend 最大）
         "尾部": bottom,   # 表现最差的（d7_roi 最低 / spend 最小）
     }
@@ -623,11 +1317,18 @@ def _tool_get_trend_with_ops(obj_type: str, obj_id: str, metric: str = "d7_roi",
     import pandas as pd
 
     # ---- 1. 取该对象的逐日指标趋势 ----
-    path = config.ADS_DIR / "daily_detail.parquet"
-    if not path.exists():
+    # 这里必须用 mature_only=True：本工具的用途是「判断趋势 + 因果关系」，
+    # 而尾部 cohort 的 D7 数据不完整（只活了 0~6 天），算出来的 d7_roi 天然偏低。
+    # 实测 ch_001 从 10-24 的 0.73 掉到 10-31 的 0.36 —— 看着像渠道崩了，
+    # 其实只是观察窗口不够。用这种数据做因果判断，会让 LLM 得出完全错误的结论。
+    #
+    # 代价是最近 7 天的 cohort 不参与趋势。想看最新明细用 _tool_get_metric（不过滤）。
+    # 这个分工是有意的：**看最新用 get_metric，判趋势用 get_trend_with_ops**。
+    try:
+        df = warehouse_api.read_daily_detail(mature_only=True)
+    except FileNotFoundError:
         return {"error": "daily_detail 数据不存在"}
 
-    df = pd.read_parquet(path)
     if obj_type == "sub_channel":
         dim_col = "sub_channel"
     elif obj_type == "creative":
@@ -657,7 +1358,7 @@ def _tool_get_trend_with_ops(obj_type: str, obj_id: str, metric: str = "d7_roi",
     trend_rows = trend_rows[-days:]
 
     # ---- 2. 取该对象的操作日志，并按天对齐 ----
-    logs = dim_scd.list_logs(limit=200)
+    logs = _op_records(200)
     # 匹配该对象相关的日志：old_value/new_value/campaign_id/field 任一包含 obj_id
     matched = []
     for l in logs:
@@ -881,8 +1582,7 @@ def run_llm_loop(snapshot: Dict[str, Any], plat=None,
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": "这是中台数据快照：\n" +
-         json.dumps(snapshot, ensure_ascii=False, default=str)},
+        {"role": "user", "content": "这是中台数据快照：\n" + _to_llm_content(snapshot)},
     ]
 
     trace: List[Dict[str, Any]] = []
@@ -955,7 +1655,7 @@ def run_llm_loop(snapshot: Dict[str, Any], plat=None,
 
                 messages.append({
                     "role": "tool", "tool_call_id": tc.id,
-                    "content": json.dumps(result, ensure_ascii=False, default=str),
+                    "content": _to_llm_content(result),
                 })
 
             if decision is not None:
@@ -1062,7 +1762,9 @@ def run_agent(dry_run: bool = True, max_rounds: int = 8) -> Dict[str, Any]:
     plat = platform_layer.get_platform("mock")
 
     # 1. 组装快照
-    snapshot = build_snapshot()
+    # persist=True：真正跑一轮时才写决策日志。
+    # 调试/展示调用不要传，否则调一次就污染一次决策历史。
+    snapshot = build_snapshot(persist=True)
     print("=" * 60)
     print("快照已组装（喂给 LLM 的初始数据）")
     print("=" * 60)
@@ -1238,7 +1940,9 @@ def run_agent_with_approval() -> Dict[str, Any]:
     plat = platform_layer.get_platform("mock")
 
     # 1. 组装快照 + 多轮 LLM（只分析，不执行写操作）
-    snapshot = build_snapshot()
+    # persist=True：真正跑一轮时才写决策日志。
+    # 调试/展示调用不要传，否则调一次就污染一次决策历史。
+    snapshot = build_snapshot(persist=True)
     decision = run_llm_loop(snapshot, plat)
 
     # 2. 只保留「写动作」作为建议（读动作 get_xxx 不落库）

@@ -5,7 +5,7 @@
 
 一个面向「海外网赚类 IAA 休闲游戏」的广告变现数据分析中台，核心是一个**「数仓 + Agent 双引擎」**：
 
-- **数仓引擎**：Pandas 四层数仓（ODS→DWD→DWS→ADS），双轴 cohort 事实表，产出日常表 / 素材表 / 子渠道表三张业务视图。
+- **数仓引擎**：ODS→DWD→DWS→ADS 分层，双轴 cohort 事实表，产出日常表 / 素材表 / 子渠道表三张业务视图。当前主链路是仓库根目录的 Spark 五层（带质量门禁与幂等），`src/warehouse.py` 是早期的 pandas 实现。
 - **Agent 引擎**：DeepSeek 大模型 + 原生 Function Calling，能自主分析指标、下钻查数、给出优化建议。
   **读写分离**：Agent 在分析阶段只有读权限，写操作（删渠道 / 调预算 / 调目标）只能作为「建议单」提交，
   经人工确认 + 护栏校验后才执行。
@@ -35,7 +35,7 @@
 
 ```
 采集层    Playwright → Unity 广告平台配置
-数仓层    Pandas 四层：ODS→DWD→DWS→ADS（Parquet 落盘）
+数仓层    ODS→DWD→DWS→ADS（Parquet 落盘）
 语义层    metrics.yaml → 声明式指标口径（先查口径再算数）
 RAG 层    ChromaDB + bge-m3 → 优化经验知识检索
 Agent层   DeepSeek(OpenAI SDK) + Function Calling → 自主分析决策
@@ -43,6 +43,20 @@ Agent层   DeepSeek(OpenAI SDK) + Function Calling → 自主分析决策
 展示层    原生 JS 单文件报表（动态维度分组 + 左上三角 Cohort）
 调度层    Airflow 每日自动跑数仓 + Agent
 ```
+
+### 仓库里有两代数仓实现，别混用
+
+| 实现 | 位置 | ADS 列数 | 定位 |
+|---|---|---|---|
+| pandas 四层 | `src/warehouse.py` | 约 60 列 | 最早的教学实现，跑得快、零 Spark 依赖 |
+| Spark 五层 | 仓库根 `scripts/build_*_iaa.py` | 78 列（多 `is_mature_d7` / `d7_roi` / `d7_ecpm` 等） | 当前主链路：带质量门禁、幂等、日志回仓 |
+
+两者写**同一个** `data/warehouse/ads/` 目录。Spark 版会写一个 `_pipeline.json` 标记，
+pandas 版读到标记会**拒绝覆盖**并给出提示（`ALLOW_PANDAS_OVERWRITE=1` 可强制）——
+否则一次误跑的 `tasks.py init` 会把 78 列换成 60 列，报错要到 Agent 查数时才出现。
+
+Agent 侧取数统一走 `src/warehouse_api.py`（`ADS_MODE=parquet|hive`），
+业务代码不直接 `pd.read_parquet`，所以换实现只改一个配置项。
 
 **关键设计**：
 - **双轴事实表**：`install_date`（cohort 锚点）+ `report_date`（回传日期），一表同时回答"今天赚了多少"和"某批用户赚了多少"。
@@ -148,6 +162,22 @@ python -m uvicorn src.app:app --reload --port 8000
 
 ```bash
 docker compose up -d   # 启动 Postgres + Airflow，Web UI: http://localhost:8080 (admin/admin)
+```
+
+`dags/iaa_warehouse_dag.py` 是数仓侧流水线（14 个 task，每层后挂质量门禁）：
+
+```
+ods → gate → (dwd, acq) → gate → dws → gate → ads → gate → 日志入仓 → gate → end
+```
+
+最后两步 `sync_decision_log` / `gate_decision_log` 把中台写的决策日志
+反向同步进数仓（SQLite → ODS/DWD/ADS → parquet），中台此后统一从数仓读日志。
+单独跑这两步：
+
+```bash
+python ../scripts/sync_decision_log_iaa.py      # 同步 + 自验收
+python ../scripts/quality_gate_iaa.py --scope log
+python check_decision_log_sync.py --idempotent  # 完整验收（含负向测试）
 ```
 
 ### 6. 看成本
