@@ -1,0 +1,31 @@
+# Hive Metastore 官方的 apache/hive 镜像不含 PostgreSQL JDBC driver。
+# 不装这个 jar，metastore 启动时会直接报 ClassNotFoundException: org.postgresql.Driver。
+FROM apache/hive:4.0.0
+
+USER root
+
+# ADD 远程文件比在容器里跑 curl 更可靠（镜像里不一定有 curl / wget）。
+# 注意：ADD 下载的文件权限是 600，属主 root，必须 chmod，否则 hive 用户读不到。
+ADD https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.4/postgresql-42.7.4.jar /opt/hive/lib/postgresql.jar
+RUN chmod 644 /opt/hive/lib/postgresql.jar
+
+# ---- 关键一步：让容器能理解 Windows 风格的 warehouse 路径 ----
+#
+# 背景：Metastore 不只是「记一个 location 字符串」。建内部表时它会亲自 mkdir
+# 那个目录。它在 Linux 容器里执行，而 location 是 file:/D:/warehouse/...，
+# 于是变成「在根目录下创建 /D: 这个文件夹」，失败：
+#   MetaException: file:/D:/warehouse/lab.db/xxx is not a directory or unable to create one
+#
+# 而 compose 的挂载目标路径不允许出现冒号（会被当成 source:target 分隔符），
+# 所以没法直接挂到 /D:/warehouse。
+#
+# 做法：把宿主机的 D:\warehouse 挂到容器的 /warehouse（见 docker-compose.yml），
+# 再在容器根目录造一个名字就叫 "D:" 的软链接指向 /（Linux 文件名允许冒号）。
+# 这样 file:/D:/warehouse/lab.db 在容器里解析成 /D:/warehouse/lab.db
+# → 经软链接 /D: → / → /warehouse/lab.db，正好是挂载进来的真实目录。
+#
+# 结果：Windows 侧看到 D:\warehouse，容器侧看到同一份文件，
+# 两边路径字符串完全一致，Metastore 与 Spark 的视角对齐。
+RUN ln -sfn / "/D:" && ls -ld "/D:"
+
+USER hive

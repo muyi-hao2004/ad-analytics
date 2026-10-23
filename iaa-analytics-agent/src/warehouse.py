@@ -16,6 +16,8 @@ IAA 广告变现分析中台 —— 四层数仓（ODS → DWD → DWS → ADS�
 
 from __future__ import annotations
 
+import os
+
 import pandas as pd
 from pathlib import Path
 from typing import List, Optional
@@ -38,8 +40,51 @@ def _read_csv_any(path: Path) -> pd.DataFrame:
         return pd.read_csv(path, encoding="gbk")
 
 
+# Spark 五层管道（scripts/build_ads_iaa.py）在 ADS 目录留的标记文件。
+# 存在即表示「这个目录当前是 Spark 产出的」，pandas 链路不许覆盖。
+_ADS_MARKER = config.ADS_DIR / "_pipeline.json"
+
+
+def _guard_ads_overwrite(path: Path) -> None:
+    """阻止 pandas 四层覆盖 Spark 五层的 ADS 产物。
+
+    为什么需要这道护栏
+    ------------------
+    仓库里有两代数仓实现，写的是**同一个** ADS 目录：
+
+      - `src/warehouse.py`（pandas 四层）：ADS 的 daily_detail 约 60 列
+      - `scripts/build_ads_iaa.py`（Spark 五层）：78 列，多了
+        `is_mature_d7` / `d7_roi` / `d7_retention` 等中台必须的列
+
+    混跑的后果不是报错，而是**静默降级**：pandas 版把文件覆盖掉之后，
+    `agent.py` 下次查询才会在某个列上 KeyError，而报错位置离真正的原因
+    （一次误执行的 `tasks.py init`）隔了几百行代码，极难定位。
+
+    所以这里 fail-fast。确实要重建 pandas 版（例如没装 Spark 想先看结构），
+    两个办法任选：删掉标记文件，或设 `ALLOW_PANDAS_OVERWRITE=1`。
+    """
+    try:
+        same_dir = path.resolve().parent == config.ADS_DIR.resolve()
+    except OSError:
+        return
+    if not same_dir or not _ADS_MARKER.exists():
+        return
+    if os.getenv("ALLOW_PANDAS_OVERWRITE") == "1":
+        return
+    raise RuntimeError(
+        f"拒绝覆盖 {path}\n"
+        f"原因：ADS 目录当前由 Spark 五层管道产出（见 {_ADS_MARKER}），"
+        "pandas 四层的列更少，覆盖后中台会缺列。\n"
+        "如果确实要重建 pandas 版：\n"
+        f"  ① rm {_ADS_MARKER}，或\n"
+        "  ② 设置环境变量 ALLOW_PANDAS_OVERWRITE=1 后重跑。\n"
+        "只想验证 Spark 版数据：别跑 tasks.py init，直接 python tasks.py test。"
+    )
+
+
 def _save_parquet(df: pd.DataFrame, path: Path) -> None:
     """存成 Parquet（列式存储）。"""
+    _guard_ads_overwrite(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(path, index=False)
 

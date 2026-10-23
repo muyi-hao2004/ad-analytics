@@ -1,0 +1,72 @@
+# 最小数仓实验环境
+#
+# 设计原则：只装真正会撞墙的部分。
+#   - Hive Metastore：给你「表定义存在哪、分区怎么登记」的真实体验
+#   - PostgreSQL：Metastore 的元数据库（也是你笔记里 §8.6 讲的 TBLS / PARTITIONS）
+#   - 不装 HDFS / YARN / MinIO：Spark 用本地文件系统当 warehouse，
+#     分区就是真实目录，反而比对象存储更直观（能用资源管理器直接看）
+#
+# 内存预算：postgres 512M + metastore 1536M ≈ 2 GB
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: lab-postgres
+    environment:
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: hive
+      POSTGRES_DB: metastore
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  metastore:
+    build:
+      context: .
+      dockerfile: Dockerfile.hive-metastore
+    image: lab/hive-metastore:4.0.0
+    container_name: lab-metastore
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SERVICE_NAME: metastore
+      DB_DRIVER: postgres
+      # 必须挂载 warehouse，且挂到「同名路径」/D:/warehouse。
+      #
+      # 为什么：Metastore 并不只是「记一个字符串」，建内部表时它会亲自
+      # mkdir 那个目录。它在容器（Linux）里执行，D: 盘不存在 →
+      #   MetaException: file:/D:/warehouse/lab.db/xxx is not a directory
+      #   or unable to create one
+      # 挂成同名路径后，两边看到的路径字符串一致，各按各自的操作系统解释：
+      #   Windows 侧 file:/D:/warehouse → D:\warehouse
+      #   Linux 容器 file:/D:/warehouse → /D:/warehouse（就是挂载点）
+      # 这是真实生产里的经典问题：Metastore 和计算节点必须对存储有相同视角。
+      SERVICE_OPTS: >-
+        -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
+        -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://postgres:5432/metastore
+        -Djavax.jdo.option.ConnectionUserName=hive
+        -Djavax.jdo.option.ConnectionPassword=hive
+        -Dmetastore.warehouse.dir=file:///D:/warehouse
+        -Dhive.metastore.warehouse.dir=file:///D:/warehouse
+        -Dhive.metastore.thrift.bind.host=0.0.0.0
+        -Dhive.metastore.port=9083
+    ports:
+      - "9083:9083"
+    volumes:
+      # 挂到不带冒号的容器路径；容器里再用软链接 /D: -> / 让
+      # file:/D:/warehouse 能解析到这个目录。详见 Dockerfile 里的注释。
+      - type: bind
+        source: D:/warehouse
+        target: /warehouse
+    mem_limit: 1536m
+
+volumes:
+  pgdata:
