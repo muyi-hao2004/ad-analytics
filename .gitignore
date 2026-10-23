@@ -93,6 +93,8 @@ docs/interview/
 wsl_error.png
 # 一次性探查脚本（_tmp_ 前缀 = 临时）
 scripts/_tmp_*.py
+# 画图时的本地预览截图（由 Edge 无头渲染产生，不入库）
+docs/images/_preview_*.png
 
 # 图片：只忽略运行产物，文档/架构图要能入库
 # （原来写的是 `*.png`，等于永远无法在 README 里放图）
