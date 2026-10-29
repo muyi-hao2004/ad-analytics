@@ -71,18 +71,32 @@ from airflow.operators.python import PythonOperator
 #   Docker 容器：DAG 被挂到 /opt/airflow/dags，项目根在 /opt/airflow/ad-analytics
 # 用「找得到就用」的候选列表，而不是写死路径 —— 写死的那份一定会在另一种环境里炸。
 _ROOT_CANDIDATES = [
-    Path(__file__).resolve().parents[2],          # 本地
-    Path("/opt/airflow/ad-analytics"),            # 容器
-    Path("/opt/airflow"),                         # 容器（项目直接挂载在根下）
+    Path(__file__).resolve().parents[2],           # 本地：ad-analytics/（dags → iaa-analytics-agent → 根）
+    Path("/opt/airflow"),                          # 容器：docker-compose 把仓库根的 scripts/ 挂到这里
+    Path("/opt/airflow/iaa-analytics-agent"),      # 容器：只有包目录时的布局
+    Path("/opt/airflow/ad-analytics"),             # 容器：另一种布局，保留兼容
 ]
-PROJECT_ROOT = next((p for p in _ROOT_CANDIDATES if (p / "scripts").is_dir()), _ROOT_CANDIDATES[0])
+PROJECT_ROOT = next((p for p in _ROOT_CANDIDATES if (p / "scripts").is_dir()), None)
+
+# 找不到项目根时不要静默退化到某个默认路径。
+# 之前这里 fallback 成 _ROOT_CANDIDATES[0]，容器里的 parents[2] 正好是 /opt，
+# 于是每次任务都报「脚本不存在: /opt/scripts/xxx.py」——
+# 错误信息指向路径，而真正的问题是「挂载点和候选列表对不上」，查起来要翻两层。
+if PROJECT_ROOT is None:
+    raise AirflowException(
+        "找不到项目根目录（需要包含 scripts/ 子目录）。已尝试：\n  "
+        + "\n  ".join(str(p) for p in _ROOT_CANDIDATES)
+        + "\n检查 docker-compose.yaml 的 volumes 挂载点是否与 _ROOT_CANDIDATES 一致。"
+    )
 SCRIPTS = PROJECT_ROOT / "scripts"
 
-# 数仓脚本跑在 .venv-spark 里（pyspark + pyyaml），不是 Airflow 自己的 venv。
-# 用环境变量覆盖，方便容器里改成 /usr/local/bin/python。
-PYTHON = os.environ.get(
-    "IAA_PYTHON",
-    str(PROJECT_ROOT / ".venv-spark" / "Scripts" / "python.exe"),
+# 数仓脚本需要 pyspark + pyyaml，跑在专门的解释器里。
+#   Windows 本地：项目自带的 .venv-spark（pyspark 4.0.3）
+#   容器内：没有 .venv-spark，退回到当前解释器（前提是镜像里装了 pyspark）
+# 仍然允许 IAA_PYTHON 显式覆盖，便于在别的机器上指向任意环境。
+_VENV_PY = PROJECT_ROOT / ".venv-spark" / "Scripts" / "python.exe"
+PYTHON = os.environ.get("IAA_PYTHON") or (
+    str(_VENV_PY) if _VENV_PY.exists() else sys.executable
 )
 
 # ODS 分区目录（不连 Spark 就能判断「上游数据到没到」）

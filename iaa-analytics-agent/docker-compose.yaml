@@ -31,10 +31,22 @@ x-airflow-common: &airflow-common
     LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
     LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
     AGENT_RUN_TIME: ${AGENT_RUN_TIME:-09:00}
+    # Hive 数据目录：Windows 上是 D:\warehouse，容器里挂在 /warehouse。
+    # DAG 的 _ods_ready() 用它判断「上游分区到没到」，Spark 脚本也用它做 warehouse.dir。
+    IAA_LAB_DB: /warehouse/lab.db
+    IAA_WAREHOUSE: file:///warehouse
   user: "50000:0"
   volumes:
     - ./dags:/opt/airflow/dags
+    # 整个 iaa-analytics-agent 挂进来（DAG 要 import src、读 metrics.yaml、写 dim.db）
     - ./:/opt/airflow/iaa-analytics-agent
+    # 仓库根的 scripts/ 也要挂：DAG 用 subprocess 调的是 scripts/build_*.py，
+    # 而 scripts/ 在 iaa-analytics-agent 的上一级。不挂的话容器里只有
+    # /opt/airflow/iaa-analytics-agent/，没有 scripts/，每个 task 都会报
+    # 「脚本不存在」。挂在 /opt/airflow/scripts 让 PROJECT_ROOT=/opt/airflow 成立。
+    - ../scripts:/opt/airflow/scripts
+    # Hive 数据目录（Windows 的 D:\warehouse）。只读挂载：容器里的任务不该改宿主机数据。
+    - D:/warehouse:/warehouse:ro
     - airflow_logs:/opt/airflow/logs
 
 services:
