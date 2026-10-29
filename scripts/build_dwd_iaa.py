@@ -30,8 +30,8 @@ os.environ["PYSPARK_PYTHON"] = sys.executable
 os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
 
 METASTORE_URI = "thrift://127.0.0.1:9083"
-WAREHOUSE = "file:///D:/warehouse"
-WAREHOUSE_DIR = r"D:\warehouse"
+WAREHOUSE = os.environ.get("IAA_WAREHOUSE", "file:///D:/warehouse")
+WAREHOUSE_DIR = os.environ.get("IAA_WAREHOUSE_DIR", r"D:/warehouse")
 
 SRC_DB, SRC_TABLE = "lab", "ods_iaa_user_daily"
 DB, TABLE = "lab", "dwd_user_daily"

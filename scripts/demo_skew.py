@@ -42,7 +42,7 @@ os.environ["PYSPARK_PYTHON"] = sys.executable
 os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
 
 METASTORE_URI = "thrift://127.0.0.1:9083"
-WAREHOUSE = "file:///D:/warehouse"
+WAREHOUSE = os.environ.get("IAA_WAREHOUSE", "file:///D:/warehouse")
 
 FACT_ROWS = 4_000_000   # 从 ODS 取多少行当事实表
 NPART = 8               # shuffle 分区数 = 同时会有多少个 task 干活

@@ -67,8 +67,8 @@ NEW_USERS_PER_DAY = 400_000
 MAX_LIFE_DAYS = 30          # 只观察装机后 30 天
 
 METASTORE_URI = "thrift://127.0.0.1:9083"
-WAREHOUSE = "file:///D:/warehouse"
-WAREHOUSE_DIR = r"D:\warehouse"
+WAREHOUSE = os.environ.get("IAA_WAREHOUSE", "file:///D:/warehouse")
+WAREHOUSE_DIR = os.environ.get("IAA_WAREHOUSE_DIR", r"D:/warehouse")
 
 DB = "lab"
 TABLE = "ods_iaa_user_daily"

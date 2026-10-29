@@ -22,7 +22,7 @@ if os.path.isdir(_HADOOP_HOME):
 os.environ["PYSPARK_PYTHON"] = sys.executable
 
 METASTORE_URI = "thrift://127.0.0.1:9083"
-WAREHOUSE = "file:///D:/warehouse"
+WAREHOUSE = os.environ.get("IAA_WAREHOUSE", "file:///D:/warehouse")
 DB = "lab"
 
 

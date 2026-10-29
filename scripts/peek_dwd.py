@@ -23,7 +23,7 @@ def main() -> int:
     spark = (
         SparkSession.builder.appName("peek-dwd")
         .master("local[2]")
-        .config("spark.sql.warehouse.dir", "file:///D:/warehouse")
+        .config("spark.sql.warehouse.dir", os.environ.get("IAA_WAREHOUSE", "file:///D:/warehouse"))
         .config("spark.hadoop.hive.metastore.uris", "thrift://127.0.0.1:9083")
         .config("spark.sql.catalogImplementation", "hive")
         .config("spark.driver.memory", "2g")

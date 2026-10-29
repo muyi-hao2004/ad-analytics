@@ -34,7 +34,7 @@ os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
 import dwd_rules  # noqa: E402
 
 METASTORE_URI = "thrift://127.0.0.1:9083"
-WAREHOUSE = "file:///D:/warehouse"
+WAREHOUSE = os.environ.get("IAA_WAREHOUSE", "file:///D:/warehouse")
 SRC = "ods.ods_ad_log"
 
 N_CLEAN = 20_000   # 干净样本行数

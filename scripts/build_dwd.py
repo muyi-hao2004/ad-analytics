@@ -47,8 +47,8 @@ SQL_DWD_EVENT = os.path.join(ROOT, "sql", "dwd", "dwd_ad_event.sql")
 SQL_DIM_CAMPAIGN = os.path.join(ROOT, "sql", "dwd", "dim_campaign.sql")
 
 METASTORE_URI = "thrift://127.0.0.1:9083"
-WAREHOUSE = "file:///D:/warehouse"
-WAREHOUSE_DIR = r"D:\warehouse"
+WAREHOUSE = os.environ.get("IAA_WAREHOUSE", "file:///D:/warehouse")
+WAREHOUSE_DIR = os.environ.get("IAA_WAREHOUSE_DIR", r"D:/warehouse")
 
 SRC_DB, SRC_TABLE = "ods", "ods_ad_log"
 DB = "dwd"

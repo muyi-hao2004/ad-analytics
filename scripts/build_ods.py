@@ -48,8 +48,8 @@ os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
 TSV = "D:/data/criteo/criteo_attribution_dataset.tsv"
 BASE_DATE = "2026-09-21"  # day_offset=0 映射到哪天
 METASTORE_URI = "thrift://127.0.0.1:9083"
-WAREHOUSE = "file:///D:/warehouse"
-WAREHOUSE_DIR = r"D:\warehouse"
+WAREHOUSE = os.environ.get("IAA_WAREHOUSE", "file:///D:/warehouse")
+WAREHOUSE_DIR = os.environ.get("IAA_WAREHOUSE_DIR", r"D:/warehouse")
 
 DB = "ods"
 TABLE = "ods_ad_log"

@@ -107,7 +107,7 @@ os.environ["PYSPARK_PYTHON"] = sys.executable
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DIM_DB = PROJECT_ROOT / "iaa-analytics-agent" / "data" / "dim.db"
 DB = "lab"
-WAREHOUSE = "file:///D:/warehouse"
+WAREHOUSE = os.environ.get("IAA_WAREHOUSE", "file:///D:/warehouse")
 
 # 导出目标和 ADS 其他表同一个目录 —— 中台只认一个目录，多一个就是多一处漂移
 ADS_OUT = PROJECT_ROOT / "iaa-analytics-agent" / "data" / "warehouse" / "ads"
