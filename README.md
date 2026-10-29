@@ -2,6 +2,28 @@
 
 [![CI](https://github.com/muyi-hao2004/ad-analytics/actions/workflows/ci.yml/badge.svg)](https://github.com/muyi-hao2004/ad-analytics/actions/workflows/ci.yml)
 
+## English Summary
+
+An end-to-end analytics pipeline for IAA (in-app advertising) monetisation,
+built with Python, PySpark and SQL. It covers synthetic data generation,
+a five-layer warehouse (ODS → DWD → DWS → ADS), 35 quality assertions defined
+in YAML, a semantic layer, and an LLM decision agent with guardrails.
+
+Engineering practices: 66 unit tests, CI on every push, idempotency verified
+across repeated runs, and an explicit scope document
+([LIMITATIONS.md](iaa-analytics-agent/LIMITATIONS.md)).
+
+Data is synthetic. Metric definitions come from a real internship; the RAG
+corpus is drawn from public reports with sources cited.
+
+The repository focuses on one question: when an LLM is placed inside a business
+decision loop, which engineering constraints are required, and how are they
+verified.
+
+<sub>The rest of this README is in Chinese.</sub>
+
+---
+
 ![端到端链路](docs/images/architecture.svg)
 
 <sub>图中层与层之间的小标签为质量门禁，未通过则在该层终止，不向下一层传递错误数据。</sub>
@@ -411,12 +433,37 @@ ad-analytics/
 ├── infra/                        # Hive Metastore 与 Postgres
 ├── sql/                          # 建表 DDL
 ├── docs/                         # 数据契约、主题笔记 25 篇
-└── learning/notes/               # 每日学习记录 day02~day29
+└── learning/                     # 学习过程记录，与主项目无关（见下）
 ```
+
+**阅读入口**：主项目请从 `iaa-analytics-agent/` 与 `scripts/` 开始看。
+`learning/` 是跟教程逐课练习的产物（FastAPI 示例、Airflow 示例、每日笔记），
+保留在此仅为记录学习轨迹，不代表项目代码质量。
 
 ---
 
-## 8. 设计决策
+## 8. 开发节奏
+
+本项目在 2026 年 9 月至 10 月集中开发，按里程碑推进，不是一次性完成：
+
+| 阶段 | 时间 | 内容 |
+|---|---|---|
+| 数仓底座 | 9 月中 | 五层结构、DWD 清洗规则、cohort 宽表 |
+| 可信度 | 9 月下 | 质量门禁、幂等验证、跨表对账 |
+| 决策层 | 10 月初 | 快照、确定性判定器、滞回 |
+| Agent 与评测 | 10 月中 | Function Calling、护栏、13 场景评测 |
+| 文档与边界 | 10 月下 | `LIMITATIONS.md`、数据契约、笔记整理 |
+
+两点说明，避免误读：
+
+- **RAG 与 Agent 层是在已有数仓之上叠加的，不是从零开始。** 数仓层复用了实习期间
+  积累的业务口径与指标定义，这部分不是本项目原创。
+- **编码过程有 AI 辅助。** 本人负责架构决策、指标口径、验收标准与问题定位；
+  第 10 节的 10 个问题均为实际调试中产生，不是事后补写。
+
+---
+
+## 9. 设计决策
 
 | 问题 | 决定 | 理由 |
 |---|---|---|
@@ -435,7 +482,7 @@ ad-analytics/
 
 ---
 
-## 9. 已修复的问题
+## 10. 已修复的问题
 
 | # | 现象 | 根因 | 修正 |
 |---|---|---|---|
@@ -452,7 +499,7 @@ ad-analytics/
 
 ---
 
-## 10. 适用范围与边界
+## 11. 适用范围与边界
 
 | 可以证明 | 不能证明 |
 |---|---|
@@ -468,7 +515,7 @@ ad-analytics/
 
 ---
 
-## 11. 文档
+## 12. 文档
 
 - [`LIMITATIONS.md`](iaa-analytics-agent/LIMITATIONS.md)：能力边界与已知限制
 - [`iaa-analytics-agent/README.md`](iaa-analytics-agent/README.md)：中台详细文档，架构、工具、护栏、成本
