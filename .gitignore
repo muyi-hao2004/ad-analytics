@@ -112,6 +112,16 @@ docker-compose.override.yml
 # 简历生成脚本内含手机号与邮箱，不入库（本地保留可用）
 scripts/gen_resume.py
 
+# —— 求职材料：面试讲稿、机考题库、岗位应急包 ——
+# 这些与项目本身无关，且含个人求职信息（目标公司、薪资预期、录取进度），
+# 不应出现在公开仓库里。用通配覆盖，避免以后新增同类文件时忘记加规则。
+docs/面试讲解稿.md
+docs/interview_script*.md
+docs/华为OD机考*.md
+docs/华清起航*.md
+docs/城大东莞*.md
+docs/英维克*
+
 # 临时文件
 /query
 
